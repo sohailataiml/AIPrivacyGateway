@@ -66,6 +66,14 @@ TASKS: dict[str, tuple[list[str], ...]] = {
     "migrate": (["uv", "run", "alembic", "upgrade", "head"],),
     "seed": (["uv", "run", "python", "-m", "scripts.seed_local"],),
     "compose-up": (["docker", "compose", "up", "--build", "-d"],),
+    # Run inside the stack: the compose database publishes no host port, so the
+    # host-run "migrate" and "seed" targets above cannot reach it.
+    "compose-migrate": (
+        ["docker", "compose", "run", "--rm", "gateway", "alembic", "upgrade", "head"],
+    ),
+    "compose-seed": (
+        ["docker", "compose", "run", "--rm", "gateway", "python", "-m", "scripts.seed_local"],
+    ),
     "compose-down": (["docker", "compose", "down", "-v"],),
 }
 

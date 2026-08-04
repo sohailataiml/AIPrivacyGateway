@@ -7,7 +7,8 @@ RUN := $(UV) run
 
 .DEFAULT_GOAL := help
 .PHONY: help install format format-check lint typecheck test test-unit test-integration \
-        test-privacy test-security coverage audit run seed migrate compose-up compose-down check
+        test-privacy test-security coverage audit run seed migrate compose-up compose-migrate \
+        compose-seed compose-down check
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
@@ -55,7 +56,11 @@ check: format-check lint typecheck test ## Everything CI runs on a fast path
 run: ## Run the API locally with reload
 	$(RUN) uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
-migrate: ## Apply database migrations
+# The migrate/seed pair below targets whatever DATABASE_URL resolves to on the
+# host -- a PostgreSQL you are running yourself. They cannot reach the compose
+# database: that container publishes no host port on purpose, so only the
+# gateway can talk to it. Use the compose-* pair for the composed stack.
+migrate: ## Apply database migrations (host-run PostgreSQL)
 	$(RUN) alembic upgrade head
 
 seed: ## Seed a local tenant, API key, and default policy (idempotent)
@@ -63,6 +68,12 @@ seed: ## Seed a local tenant, API key, and default policy (idempotent)
 
 compose-up: ## Start the local stack
 	docker compose up --build -d
+
+compose-migrate: ## Apply migrations inside the stack (run after compose-up)
+	docker compose run --rm gateway alembic upgrade head
+
+compose-seed: ## Seed the stack's database and print an API key (run after compose-migrate)
+	docker compose run --rm gateway python -m scripts.seed_local
 
 compose-down: ## Stop the local stack and remove volumes
 	docker compose down -v
