@@ -48,3 +48,10 @@ Before changing any of these areas, verify that the change conforms to the relev
 - Testing strategy
 
 When a requested implementation conflicts with an accepted ADR, stop and create a proposed superseding ADR before changing the code.
+
+
+## Frontend Decisions
+
+- [ADR-0017: Use Next.js for the interview frontend](0017-use-nextjs-frontend.md)
+- [ADR-0018: Use one role-aware web application](0018-one-role-aware-web-app.md)
+- [ADR-0019: Do not persist sensitive data in browser storage](0019-no-sensitive-browser-persistence.md)

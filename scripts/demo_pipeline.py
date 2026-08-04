@@ -27,7 +27,6 @@ from app.domain.models import ChatMessage, ProtectedChatRequest
 from app.llm.mock_provider import MockProvider
 from app.policy.defaults import DEFAULT_POLICY
 from app.policy.models import PolicySnapshot
-from app.policy.validation import validate_policy_document
 from app.restoration.pipeline import OutputPipeline
 from app.tokenization.tokenizer import Tokenizer
 from app.vault.fakes import InMemoryTokenVault
@@ -51,9 +50,8 @@ async def main() -> int:
 
     # A policy is normally loaded from PostgreSQL. The shipped default is the
     # same document the seed script writes.
-    document = validate_policy_document(DEFAULT_POLICY)
     policy = PolicySnapshot.from_document(
-        document, policy_id=uuid4(), tenant_id=tenant_id, version=1
+        DEFAULT_POLICY, policy_id=uuid4(), tenant_id=tenant_id, version=1
     )
 
     detector = PresidioDetector(config=DetectionConfig())

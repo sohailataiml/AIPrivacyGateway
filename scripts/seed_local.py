@@ -25,6 +25,7 @@ from uuid import UUID
 from app.config.settings import AppEnv, Settings
 from app.db.session import build_engine_from_settings, build_session_factory, transaction
 from app.domain.models import Scope
+from app.policy.defaults import DEFAULT_MODEL_ALIAS, DEFAULT_POLICY
 from app.repositories.api_keys import SqlAlchemyApiKeyRepository
 from app.repositories.policies import DEFAULT_POLICY_NAME, SqlAlchemyPolicyRepository
 from app.repositories.provider_configs import SqlAlchemyProviderConfigRepository
@@ -34,27 +35,29 @@ LOCAL_TENANT_SLUG = "local"
 LOCAL_TENANT_NAME = "Local Development"
 LOCAL_API_KEY_NAME = "local-development"
 LOCAL_PROVIDER_ALIAS = "mock"
+LOCAL_MODEL_ALIAS = DEFAULT_MODEL_ALIAS
 # The suppression below is justified: this is the *name* of an environment
 # variable, the only thing provider_configs.secret_ref ever holds. Not a secret.
 LOCAL_PROVIDER_SECRET_REF = "OPENAI_API_KEY"  # noqa: S105
 DEFAULT_POLICY_VERSION = 1
 
-DEFAULT_POLICY_DOCUMENT: dict[str, Any] = {
-    "schema_version": 1,
-    "name": DEFAULT_POLICY_NAME,
-    "session_ttl_seconds": 1800,
-    "max_entities": 500,
-    "providers": {LOCAL_PROVIDER_ALIAS: {"models": ["general-chat"]}},
-    "entities": {
-        "EMAIL_ADDRESS": {"action": "tokenize", "min_score": 0.7},
-        "PHONE_NUMBER": {"action": "tokenize", "min_score": 0.65},
-        "US_SSN": {"action": "block", "min_score": 0.5},
-        "CREDIT_CARD": {"action": "block", "min_score": 0.5},
-        "PERSON": {"action": "tokenize", "min_score": 0.75},
-        "LOCATION": {"action": "tokenize", "min_score": 0.8},
-    },
-    "unknown_output_token_action": "preserve",
-}
+
+def _default_policy_document() -> dict[str, Any]:
+    """Serialize the shipped default policy for storage.
+
+    Derived from ``app.policy.defaults.DEFAULT_POLICY`` rather than restated
+    here. An earlier version of this file kept its own copy of the document,
+    and when the PHONE_NUMBER threshold was lowered in ``defaults.py`` to stop
+    phone numbers leaking, this copy silently kept the old value -- so a freshly
+    seeded database was still running the unsafe policy while every test passed.
+
+    One definition, serialized. The only local substitution is the provider
+    alias, because the shipped default names a provider this machine has no
+    credentials for.
+    """
+    document: dict[str, Any] = DEFAULT_POLICY.model_dump(mode="json")
+    document["providers"] = {LOCAL_PROVIDER_ALIAS: {"models": [LOCAL_MODEL_ALIAS]}}
+    return document
 
 
 def _write(line: str) -> None:
@@ -73,7 +76,7 @@ async def _seed_policy(policies: SqlAlchemyPolicyRepository, tenant_id: UUID) ->
         tenant_id,
         name=DEFAULT_POLICY_NAME,
         version=DEFAULT_POLICY_VERSION,
-        document=DEFAULT_POLICY_DOCUMENT,
+        document=_default_policy_document(),
         is_active=True,
     )
     return policy.id, True

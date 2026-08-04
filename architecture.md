@@ -1152,7 +1152,478 @@ Reason: make insecure direct calls harder through type and module boundaries.
 
 ---
 
-## 22. Definition of Done
+
+## 22. Frontend and User Experience Architecture
+
+The Secure AI Gateway includes a lightweight enterprise web application for interview demonstration and operational visibility. The frontend is a presentation layer over the gateway APIs; it is not a separate privacy boundary and must never receive vault mappings, provider credentials, encryption keys, or raw audit data.
+
+### 22.1 Product surfaces
+
+The frontend contains two role-oriented surfaces within one web application:
+
+1. **Secure Chat Workspace**
+   - Allows an authorized user to submit prompts through the gateway.
+   - Displays the restored model response.
+   - Displays privacy-safe processing metadata.
+   - Includes a Privacy Inspector that explains the secure pipeline using entity types, counts, actions, and timing.
+   - Never displays decrypted vault records.
+
+2. **Security and Operations Console**
+   - Displays request volume, entity counts, policy blocks, latency, provider status, and dependency health.
+   - Provides metadata-only session exploration.
+   - Provides audit-event exploration.
+   - Allows authorized administrators to inspect and edit policies.
+   - Displays configured provider aliases and health without exposing secrets.
+   - Includes an architecture explanation page for the interview demonstration.
+
+### 22.2 Frontend system context
+
+```mermaid
+flowchart LR
+    B[Browser]
+    W[Next.js Web Application]
+    G[FastAPI Secure AI Gateway]
+    V[(Encrypted Redis Vault)]
+    D[(PostgreSQL)]
+    L[External LLM Provider]
+
+    B -->|HTTPS| W
+    W -->|Gateway API requests| G
+    G --> V
+    G --> D
+    G -->|Protected prompts only| L
+
+    V -. no direct browser access .-> B
+    L -. no direct browser access .-> B
+```
+
+The browser communicates only with approved gateway APIs. It must not call LLM providers or Redis directly.
+
+### 22.3 Frontend technology
+
+Use:
+
+- Next.js with the App Router.
+- React and TypeScript.
+- Tailwind CSS.
+- shadcn/ui or equivalent accessible component primitives.
+- TanStack Query for server-state retrieval and invalidation.
+- React Hook Form with Zod for policy and chat forms.
+- Recharts for dashboard visualizations.
+- Vitest and React Testing Library for component tests.
+- Playwright for critical end-to-end flows.
+
+The exact current stable versions must be selected at implementation time and pinned in the frontend lock file.
+
+### 22.4 Application routes
+
+```text
+/login
+/chat
+/dashboard
+/sessions
+/sessions/[sessionId]
+/audit
+/audit/[requestId]
+/policies
+/policies/[policyId]
+/providers
+/health
+/architecture
+/about
+```
+
+Interview version 1 may use a local API-key login screen that stores the credential only in memory or a secure server-managed session. Do not place API keys in local storage.
+
+### 22.5 Frontend role model
+
+Initial roles:
+
+- **User**
+  - invoke chat
+  - view own privacy metadata
+  - delete owned sessions
+
+- **Security Analyst**
+  - view dashboard
+  - view privacy-safe session and audit metadata
+  - view policies and provider health
+
+- **Administrator**
+  - all analyst permissions
+  - edit policies
+  - enable or disable approved provider aliases
+  - create or revoke API clients through future admin APIs
+
+UI authorization improves usability but is not a security control. Every backend endpoint must enforce scopes independently.
+
+### 22.6 Secure Chat Workspace
+
+The main chat experience contains:
+
+- Header with environment, provider alias, model alias, and active policy.
+- Conversation panel.
+- Prompt composer.
+- Privacy Inspector panel.
+- Request metadata panel.
+- Clear session action.
+- Synthetic demo examples.
+
+The Privacy Inspector displays these states:
+
+```text
+Idle
+→ Validating
+→ Detecting sensitive data
+→ Applying policy
+→ Tokenizing
+→ Securing mappings
+→ Calling provider
+→ Restoring authorized values
+→ Completed
+```
+
+For synchronous version 1, these are UI progress states based on request lifecycle and returned metadata. The UI must not claim to receive private internal events that the API does not expose.
+
+Privacy Inspector data may include:
+
+- entity type
+- entity count
+- policy action
+- processing status
+- total gateway latency
+- provider latency
+- policy version
+- unknown token count
+
+It must not include:
+
+- matched original values
+- complete gateway tokens
+- encrypted mapping payloads
+- provider request body
+- prompt or response in analytics events
+
+A development-only “Protected Prompt Preview” may be supported using synthetic data or a privileged diagnostic endpoint. It must be disabled in production by default and must never reveal token mappings.
+
+### 22.7 Security Dashboard
+
+Dashboard cards:
+
+- Requests today
+- Sensitive entities detected
+- Tokenized entities
+- Blocked requests
+- Average gateway overhead
+- Provider success rate
+- Active sessions
+- Dependency health
+
+Charts:
+
+- Requests over time
+- Entities by type
+- Actions by policy
+- Provider usage
+- Latency percentiles
+- Error codes over time
+
+Recent activity table:
+
+- timestamp
+- request ID
+- provider alias
+- model alias
+- policy version
+- entity count
+- result
+- latency
+
+No raw text is displayed.
+
+### 22.8 Session Explorer
+
+Session list fields:
+
+- hashed or shortened session identifier
+- created time
+- last activity
+- mapping count
+- entity-type counts
+- remaining TTL
+- provider alias
+- status
+
+Session detail may display:
+
+- privacy-safe request timeline
+- entity-type aggregates
+- policy version
+- vault encryption status
+- deletion action
+
+The frontend must never expose original token values or a “decrypt” control.
+
+### 22.9 Audit Explorer
+
+Audit records display metadata from `audit_events`.
+
+Filters:
+
+- date range
+- status
+- provider
+- model
+- policy
+- entity type
+- block reason
+- error code
+
+Audit detail displays:
+
+- request ID
+- timestamp
+- tenant-safe principal identifier
+- policy version
+- provider and model aliases
+- character counts
+- entity counts
+- actions
+- latency
+- result and safe error code
+
+Prompt and response content remain unavailable by architectural decision.
+
+### 22.10 Policy Manager
+
+The Policy Manager provides:
+
+- policy list with active version
+- policy detail
+- entity action table
+- confidence thresholds
+- provider/model allowlist
+- session TTL
+- maximum entities
+- output unknown-token behavior
+- JSON preview
+- validation results
+- save-as-new-version behavior
+
+Editing an active policy creates a new version. Existing accepted policy versions are immutable.
+
+Dangerous actions such as switching `BLOCK` to `ALLOW` require explicit confirmation and a summary of the changed controls.
+
+### 22.11 Provider and Health Pages
+
+Provider page fields:
+
+- alias
+- provider type
+- model aliases
+- enabled status
+- health status
+- timeout policy
+- storage policy indicator
+- last health check
+
+Never display secret values or full secret references.
+
+Health page displays:
+
+- gateway
+- Redis
+- PostgreSQL
+- detector
+- configured provider
+- audit queue
+- metrics subsystem
+
+Health information must be coarse enough to avoid leaking internal network details.
+
+### 22.12 Architecture Page
+
+The Architecture page is part of the interview experience. It presents:
+
+- system purpose
+- high-level data flow
+- trust boundaries
+- secure-context sequence
+- token lifecycle
+- fail-closed behavior
+- technology choices
+- selected ADRs
+- known limitations
+
+This page uses static documentation content bundled with the frontend. It must not expose runtime secrets or deployment topology details beyond the approved diagram.
+
+### 22.13 Frontend state management
+
+Use three categories of state:
+
+1. **Server state**
+   - TanStack Query
+   - dashboard metrics
+   - sessions
+   - audits
+   - policies
+   - provider health
+
+2. **Form and transient UI state**
+   - React Hook Form
+   - prompt draft
+   - filters
+   - modal state
+
+3. **Authentication state**
+   - Prefer an HTTP-only secure session cookie issued by a backend-for-frontend endpoint.
+   - For a local interview-only mode, allow an in-memory API key.
+   - Never store credentials in local storage, query strings, analytics, or error reports.
+
+Avoid a global client store unless a concrete need emerges.
+
+### 22.14 Frontend API integration
+
+All API calls use one typed client.
+
+Requirements:
+
+- configurable gateway base URL
+- request ID propagation
+- safe error mapping
+- request cancellation
+- retry only idempotent reads
+- no automatic retry of chat submissions
+- `Cache-Control: no-store` handling for sensitive routes
+- no request/response body telemetry
+- generated or manually maintained types aligned with OpenAPI
+
+### 22.15 Frontend security controls
+
+- Content Security Policy.
+- `frame-ancestors 'none'` unless embedding is explicitly required.
+- Secure, HTTP-only, same-site cookies for session mode.
+- No API keys in local storage.
+- No raw prompt content in analytics.
+- No raw audit content.
+- XSS-safe rendering of model output.
+- Markdown rendering disabled initially or sanitized with a strict allowlist.
+- External links use safe `rel` attributes.
+- Dependency and supply-chain scanning.
+- Route guards for user experience, plus mandatory backend authorization.
+- No browser access to Redis, PostgreSQL, provider APIs, or secrets.
+
+### 22.16 Accessibility and visual design
+
+- Meet WCAG 2.1 AA for the interview submission where practical.
+- Keyboard-operable navigation.
+- Visible focus states.
+- Semantic headings.
+- Accessible tables and chart summaries.
+- Status is not represented by color alone.
+- Responsive desktop-first layout.
+- Neutral enterprise visual language rather than a consumer chatbot clone.
+
+### 22.17 Frontend repository structure
+
+```text
+frontend/
+├── app/
+│   ├── (auth)/
+│   ├── (workspace)/
+│   ├── api/
+│   ├── chat/
+│   ├── dashboard/
+│   ├── sessions/
+│   ├── audit/
+│   ├── policies/
+│   ├── providers/
+│   ├── health/
+│   └── architecture/
+├── components/
+│   ├── layout/
+│   ├── chat/
+│   ├── privacy/
+│   ├── dashboard/
+│   ├── tables/
+│   ├── forms/
+│   └── ui/
+├── lib/
+│   ├── api/
+│   ├── auth/
+│   ├── schemas/
+│   ├── formatting/
+│   └── telemetry/
+├── hooks/
+├── tests/
+│   ├── unit/
+│   └── e2e/
+├── public/
+├── package.json
+└── next.config.ts
+```
+
+### 22.18 Frontend testing
+
+Required tests:
+
+- Chat request and restored response.
+- Policy-blocked request.
+- Privacy Inspector metadata rendering.
+- Credential not persisted to local storage.
+- Audit page does not render raw content.
+- Session page has no decrypt operation.
+- Unauthorized routes redirect or show access denied.
+- Policy version editing creates a new version.
+- Model output is escaped or sanitized.
+- Mobile and keyboard navigation smoke tests.
+
+### 22.19 Frontend deployment
+
+For local development:
+
+- frontend container
+- gateway container
+- Redis
+- PostgreSQL
+- mock provider
+
+For interview hosting:
+
+- deploy frontend and gateway under the same top-level domain where practical
+- use HTTPS
+- restrict CORS
+- use demo credentials with narrow permissions
+- use synthetic data only
+- disable destructive admin actions or reset demo data automatically
+
+---
+
+## 23. Interview Submission Scope
+
+The polished interview submission must prioritize a complete, demonstrable vertical slice over feature breadth.
+
+Required UI pages:
+
+1. Secure Chat Workspace
+2. Privacy Inspector
+3. Security Dashboard
+4. Audit Explorer
+5. Policy Viewer or limited Policy Manager
+6. System Health
+7. Architecture Page
+
+Optional pages:
+
+- Session Explorer
+- Provider management
+- Full policy editing
+- Login administration
+
+The submission should use synthetic example data and a mock provider mode so reviewers can run it without paid credentials.
+
+
+## 24. Definition of Done
 
 The architecture is implemented when:
 
@@ -1165,3 +1636,9 @@ The architecture is implemented when:
 - The service runs through Docker Compose.
 - Unit and integration tests pass in CI.
 - A threat-model review finds no known critical path that bypasses the secure pipeline.
+- The Secure Chat Workspace demonstrates protected request handling and restored output.
+- The Privacy Inspector displays only privacy-safe metadata.
+- Dashboard, audit, policy, health, and architecture pages are available.
+- Browser storage contains no API keys, prompts, responses, mappings, or full tokens.
+- Frontend authorization states match backend scope enforcement.
+- End-to-end tests cover the primary interview demo.

@@ -13,6 +13,8 @@
 
 Read `architecture.md` completely before changing code.
 
+Read `docs/adr/README.md` and every ADR with status **Accepted** before changing architecture-sensitive code.
+
 Implement phases in order. At the end of every phase:
 
 1. Run formatting, linting, static type checking, unit tests, and relevant integration tests.
@@ -64,7 +66,6 @@ Version 1 must include:
 
 Version 1 must not include:
 
-- Web dashboard.
 - Kubernetes or Helm deployment.
 - Streaming responses.
 - Multiple external providers.
@@ -147,18 +148,18 @@ Use `uv` for dependency and environment management unless the existing project a
 
 ### Tasks
 
-- [x] Create directory structure from `architecture.md`.
-- [x] Initialize `pyproject.toml`.
-- [x] Configure Ruff formatting and linting.
-- [x] Configure mypy in strict or near-strict mode.
-- [x] Configure pytest and coverage.
-- [x] Add `.gitignore`.
-- [x] Add `.env.example` with variable names and safe placeholders.
-- [x] Add `Makefile`.
-- [x] Add pre-commit configuration.
-- [x] Add CI workflow for lint, type check, tests, dependency audit, and secret scan.
-- [x] Add `README.md` with local setup instructions.
-- [x] Add a minimal `app/main.py`.
+- [ ] Create directory structure from `architecture.md`.
+- [ ] Initialize `pyproject.toml`.
+- [ ] Configure Ruff formatting and linting.
+- [ ] Configure mypy in strict or near-strict mode.
+- [ ] Configure pytest and coverage.
+- [ ] Add `.gitignore`.
+- [ ] Add `.env.example` with variable names and safe placeholders.
+- [ ] Add `Makefile`.
+- [ ] Add pre-commit configuration.
+- [ ] Add CI workflow for lint, type check, tests, dependency audit, and secret scan.
+- [ ] Add `README.md` with local setup instructions.
+- [ ] Add a minimal `app/main.py`.
 
 ### Required files
 
@@ -189,17 +190,17 @@ tests/unit/test_bootstrap.py
 
 ### Tasks
 
-- [x] Implement typed settings in `app/config/settings.py`.
-- [x] Add environment profiles: `local`, `test`, `production`.
-- [x] Validate required production secrets.
-- [x] Configure FastAPI lifespan.
+- [ ] Implement typed settings in `app/config/settings.py`.
+- [ ] Add environment profiles: `local`, `test`, `production`.
+- [ ] Validate required production secrets.
+- [ ] Configure FastAPI lifespan.
 - [ ] Initialize Redis and PostgreSQL clients during startup.
 - [ ] Close resources during shutdown.
-- [x] Add request ID middleware.
-- [x] Add safe structured logging.
-- [x] Add global exception handlers.
-- [x] Add CORS disabled by default.
-- [x] Add body-size enforcement.
+- [ ] Add request ID middleware.
+- [ ] Add safe structured logging.
+- [ ] Add global exception handlers.
+- [ ] Add CORS disabled by default.
+- [ ] Add body-size enforcement.
 
 ### Settings rules
 
@@ -234,13 +235,13 @@ tests/unit/test_bootstrap.py
 
 ### Tasks
 
-- [x] Configure async SQLAlchemy engine and sessions.
-- [x] Configure Alembic.
-- [x] Create migrations for tenants, API keys, policies, provider configs, and audit events.
-- [x] Implement repository interfaces.
-- [x] Add transaction helper.
-- [x] Seed one local tenant and default policy through an idempotent script.
-- [x] Store only provider secret references, never provider secrets.
+- [ ] Configure async SQLAlchemy engine and sessions.
+- [ ] Configure Alembic.
+- [ ] Create migrations for tenants, API keys, policies, provider configs, and audit events.
+- [ ] Implement repository interfaces.
+- [ ] Add transaction helper.
+- [ ] Seed one local tenant and default policy through an idempotent script.
+- [ ] Store only provider secret references, never provider secrets.
 
 ### API key storage
 
@@ -275,16 +276,16 @@ Do not store the raw key.
 
 ### Tasks
 
-- [x] Parse `Authorization: Bearer <api-key>`.
-- [x] Resolve API key by prefix.
-- [x] Verify its hash safely.
-- [x] Reject expired, disabled, or unknown keys.
-- [x] Construct immutable `Principal`.
-- [x] Implement scope dependency.
-- [x] Update `last_used_at` asynchronously or with bounded frequency.
-- [x] Implement Redis-backed fixed-window or sliding-window rate limiting.
-- [x] Rate limit by tenant and API key.
-- [x] Add authentication and rate-limit metrics.
+- [ ] Parse `Authorization: Bearer <api-key>`.
+- [ ] Resolve API key by prefix.
+- [ ] Verify its hash safely.
+- [ ] Reject expired, disabled, or unknown keys.
+- [ ] Construct immutable `Principal`.
+- [ ] Implement scope dependency.
+- [ ] Update `last_used_at` asynchronously or with bounded frequency.
+- [ ] Implement Redis-backed fixed-window or sliding-window rate limiting.
+- [ ] Rate limit by tenant and API key.
+- [ ] Add authentication and rate-limit metrics.
 
 ### Security requirements
 
@@ -320,15 +321,15 @@ Do not store the raw key.
 
 ### Tasks
 
-- [x] Define policy schema.
-- [x] Implement default policy.
-- [x] Implement tenant policy repository.
-- [x] Resolve active policy snapshot per request.
-- [x] Validate entity actions and thresholds.
-- [x] Validate provider and model allowlists.
-- [x] Add policy version to request context and audit metadata.
-- [x] Cache policy documents briefly without caching secrets.
-- [x] Add policy-validation command.
+- [ ] Define policy schema.
+- [ ] Implement default policy.
+- [ ] Implement tenant policy repository.
+- [ ] Resolve active policy snapshot per request.
+- [ ] Validate entity actions and thresholds.
+- [ ] Validate provider and model allowlists.
+- [ ] Add policy version to request context and audit metadata.
+- [ ] Cache policy documents briefly without caching secrets.
+- [ ] Add policy-validation command.
 
 ### Example policy
 
@@ -345,7 +346,7 @@ Do not store the raw key.
   },
   "entities": {
     "EMAIL_ADDRESS": {"action": "tokenize", "min_score": 0.7},
-    "PHONE_NUMBER": {"action": "tokenize", "min_score": 0.4},
+    "PHONE_NUMBER": {"action": "tokenize", "min_score": 0.65},
     "US_SSN": {"action": "block", "min_score": 0.5},
     "CREDIT_CARD": {"action": "block", "min_score": 0.5},
     "PERSON": {"action": "tokenize", "min_score": 0.75},
@@ -368,20 +369,20 @@ Do not store the raw key.
 
 ### Tasks
 
-- [x] Define detector interface and domain models.
-- [x] Integrate Presidio analyzer.
-- [x] Configure spaCy model through setup documentation.
-- [x] Add custom regex recognizers for:
-  - [x] API keys or bearer tokens.
-  - [x] Medical record number sample format.
-  - [x] Health plan identifier sample format.
-  - [x] Enterprise account number sample format.
-- [x] Add allowlist support.
-- [x] Add confidence thresholds.
-- [x] Implement deterministic overlap resolution.
-- [x] Add language parameter with English enabled.
-- [x] Add maximum-entity guard.
-- [x] Record recognizer name only in diagnostic mode.
+- [ ] Define detector interface and domain models.
+- [ ] Integrate Presidio analyzer.
+- [ ] Configure spaCy model through setup documentation.
+- [ ] Add custom regex recognizers for:
+  - [ ] API keys or bearer tokens.
+  - [ ] Medical record number sample format.
+  - [ ] Health plan identifier sample format.
+  - [ ] Enterprise account number sample format.
+- [ ] Add allowlist support.
+- [ ] Add confidence thresholds.
+- [ ] Implement deterministic overlap resolution.
+- [ ] Add language parameter with English enabled.
+- [ ] Add maximum-entity guard.
+- [ ] Record recognizer name only in diagnostic mode.
 
 ### Detector input contract
 
@@ -435,16 +436,16 @@ Create synthetic fixtures only:
 
 ### Tasks
 
-- [x] Define exact token grammar.
-- [x] Implement cryptographically random token IDs.
-- [x] Implement entity-specific normalization.
-- [x] Implement HMAC fingerprinting.
-- [x] Implement right-to-left replacement.
-- [x] Implement action handlers for allow, tokenize, redact, pseudonymize, and block.
-- [x] Return a protected type that cannot be confused with raw input.
-- [x] Add repeated-value token reuse within a session.
-- [x] Enforce maximum entity count.
-- [x] Add property-based tests for offset safety.
+- [ ] Define exact token grammar.
+- [ ] Implement cryptographically random token IDs.
+- [ ] Implement entity-specific normalization.
+- [ ] Implement HMAC fingerprinting.
+- [ ] Implement right-to-left replacement.
+- [ ] Implement action handlers for allow, tokenize, redact, pseudonymize, and block.
+- [ ] Return a protected type that cannot be confused with raw input.
+- [ ] Add repeated-value token reuse within a session.
+- [ ] Enforce maximum entity count.
+- [ ] Add property-based tests for offset safety.
 
 ### Token grammar
 
@@ -477,18 +478,18 @@ Use a parser, not only a loose regex, for restoration.
 
 ### Tasks
 
-- [x] Define vault interface.
-- [x] Implement AES-256-GCM envelope encryption.
-- [x] Load active key and key ring through settings.
-- [x] Include associated data.
-- [x] Implement token record storage.
-- [x] Implement fingerprint-to-token index.
-- [x] Implement atomic create-or-reuse operation using Lua or transaction.
-- [x] Apply TTL to all keys.
-- [x] Implement batch retrieval.
-- [x] Implement session deletion.
-- [x] Implement key-rotation-compatible decryption.
-- [x] Add vault latency and result metrics.
+- [ ] Define vault interface.
+- [ ] Implement AES-256-GCM envelope encryption.
+- [ ] Load active key and key ring through settings.
+- [ ] Include associated data.
+- [ ] Implement token record storage.
+- [ ] Implement fingerprint-to-token index.
+- [ ] Implement atomic create-or-reuse operation using Lua or transaction.
+- [ ] Apply TTL to all keys.
+- [ ] Implement batch retrieval.
+- [ ] Implement session deletion.
+- [ ] Implement key-rotation-compatible decryption.
+- [ ] Add vault latency and result metrics.
 
 ### Vault interface
 
@@ -544,16 +545,16 @@ class TokenVault(Protocol):
 
 ### Tasks
 
-- [x] Implement pipeline service.
-- [x] Process system, user, and assistant message content.
-- [x] Resolve one session ID.
-- [x] Apply policy and detection.
-- [x] Persist mappings before provider invocation.
-- [x] Produce `ProtectedChatRequest`.
-- [x] Add privacy metadata counters.
-- [x] Add pipeline timeout.
-- [x] Add bounded concurrency for provider calls.
-- [x] Add fail-closed errors.
+- [ ] Implement pipeline service.
+- [ ] Process system, user, and assistant message content.
+- [ ] Resolve one session ID.
+- [ ] Apply policy and detection.
+- [ ] Persist mappings before provider invocation.
+- [ ] Produce `ProtectedChatRequest`.
+- [ ] Add privacy metadata counters.
+- [ ] Add pipeline timeout.
+- [ ] Add bounded concurrency for provider calls.
+- [ ] Add fail-closed errors.
 
 ### Pipeline pseudocode
 
@@ -604,17 +605,17 @@ async def invoke(raw_request: ChatRequest, principal: Principal) -> ChatResponse
 
 ### Tasks
 
-- [x] Define provider registry.
-- [x] Implement `OpenAIProvider`.
-- [x] Map internal model alias to provider model ID.
-- [x] Use the current official OpenAI text generation interface supported by the installed SDK.
-- [x] Configure timeouts.
-- [x] Configure bounded retry for transient network and selected `429` or `5xx` responses.
-- [x] Disable storage where supported and required by policy.
-- [x] Map provider errors into domain errors.
-- [x] Capture usage metadata.
-- [x] Add HTTP mocking with `respx` or SDK transport fakes.
-- [x] Ensure provider client never logs request content.
+- [ ] Define provider registry.
+- [ ] Implement `OpenAIProvider`.
+- [ ] Map internal model alias to provider model ID.
+- [ ] Use the current official OpenAI text generation interface supported by the installed SDK.
+- [ ] Configure timeouts.
+- [ ] Configure bounded retry for transient network and selected `429` or `5xx` responses.
+- [ ] Disable storage where supported and required by policy.
+- [ ] Map provider errors into domain errors.
+- [ ] Capture usage metadata.
+- [ ] Add HTTP mocking with `respx` or SDK transport fakes.
+- [ ] Ensure provider client never logs request content.
 
 ### Provider safety rules
 
@@ -651,16 +652,16 @@ async def invoke(raw_request: ChatRequest, principal: Principal) -> ChatResponse
 
 ### Tasks
 
-- [x] Implement strict token parser.
-- [x] Buffer and parse synchronous response.
-- [x] Batch vault resolution.
-- [x] Restore only complete exact tokens.
-- [x] Preserve unknown tokens by default.
-- [x] Add unknown-token count.
-- [x] Enforce output-size limit.
-- [x] Add optional output scan.
-- [x] Reject malformed provider payloads.
-- [x] Prevent recursive or repeated restoration errors.
+- [ ] Implement strict token parser.
+- [ ] Buffer and parse synchronous response.
+- [ ] Batch vault resolution.
+- [ ] Restore only complete exact tokens.
+- [ ] Preserve unknown tokens by default.
+- [ ] Add unknown-token count.
+- [ ] Enforce output-size limit.
+- [ ] Add optional output scan.
+- [ ] Reject malformed provider payloads.
+- [ ] Prevent recursive or repeated restoration errors.
 
 ### Restoration algorithm
 
@@ -703,8 +704,8 @@ async def invoke(raw_request: ChatRequest, principal: Principal) -> ChatResponse
 - [ ] `POST /v1/chat`
 - [ ] `POST /v1/detect`
 - [ ] `DELETE /v1/sessions/{session_id}`
-- [x] `GET /health/live`
-- [x] `GET /health/ready` (shape only; real dependency checks are Phase 13)
+- [ ] `GET /health/live`
+- [ ] `GET /health/ready`
 - [ ] `GET /metrics`
 
 ### `POST /v1/chat`
@@ -750,13 +751,13 @@ Requirements:
 
 ### Tasks
 
-- [x] Implement audit event model and repository.
-- [x] Add bounded asynchronous queue.
-- [x] Record request outcome and privacy counts.
-- [x] HMAC prompt and response for correlation.
-- [x] Store policy version.
-- [x] Add audit failure metric.
-- [x] Add configurable fail-open or fail-closed audit behavior; production default should be explicit.
+- [ ] Implement audit event model and repository.
+- [ ] Add bounded asynchronous queue.
+- [ ] Record request outcome and privacy counts.
+- [ ] HMAC prompt and response for correlation.
+- [ ] Store policy version.
+- [ ] Add audit failure metric.
+- [ ] Add configurable fail-open or fail-closed audit behavior; production default should be explicit.
 - [ ] Add retention documentation.
 
 ### Prohibited fields
@@ -838,17 +839,17 @@ Grafana is optional for version 1.
 
 ### Tasks
 
-- [x] Create multi-stage Dockerfile.
-- [x] Run as non-root.
-- [x] Add health check.
-- [x] Use read-only filesystem where practical.
-- [x] Drop Linux capabilities.
-- [x] Mount only required writable temporary directories.
-- [x] Create Docker Compose configuration.
-- [x] Add migration startup command or explicit documented migration step.
-- [x] Add seed script.
-- [x] Add local mock-provider option for demos.
-- [x] Ensure local default does not accidentally call a paid provider.
+- [ ] Create multi-stage Dockerfile.
+- [ ] Run as non-root.
+- [ ] Add health check.
+- [ ] Use read-only filesystem where practical.
+- [ ] Drop Linux capabilities.
+- [ ] Mount only required writable temporary directories.
+- [ ] Create Docker Compose configuration.
+- [ ] Add migration startup command or explicit documented migration step.
+- [ ] Add seed script.
+- [ ] Add local mock-provider option for demos.
+- [ ] Ensure local default does not accidentally call a paid provider.
 
 ### Acceptance criteria
 
@@ -860,7 +861,150 @@ Grafana is optional for version 1.
 
 ---
 
-## 20. Phase 15 — Test Strategy
+
+## 17. Phase 16 — Frontend Bootstrap
+
+### Tasks
+
+- [ ] Create `frontend/` as a Next.js TypeScript application using the App Router.
+- [ ] Configure Tailwind CSS and accessible UI primitives.
+- [ ] Configure ESLint, formatting, TypeScript strict mode, Vitest, React Testing Library, and Playwright.
+- [ ] Add application shell, sidebar, header, loading states, empty states, and error boundary.
+- [ ] Implement one typed gateway API client.
+- [ ] Add environment configuration without exposing server secrets.
+- [ ] Add interview authentication using an in-memory API key or secure server session.
+- [ ] Add Content Security Policy and standard browser security headers.
+- [ ] Add frontend commands to the root `Makefile`.
+
+### Acceptance criteria
+
+- Frontend starts locally and builds successfully.
+- Linting, type checking, unit tests, and build pass.
+- No credentials are written to local storage or session storage.
+- API errors display safe messages and request IDs.
+- Browser telemetry does not collect prompts or responses.
+
+---
+
+## 18. Phase 17 — Secure Chat Workspace and Privacy Inspector
+
+### Tasks
+
+- [ ] Implement `/chat`.
+- [ ] Add provider, model, and active-policy display.
+- [ ] Implement conversation panel and prompt composer.
+- [ ] Invoke `POST /v1/chat`.
+- [ ] Render restored assistant output safely.
+- [ ] Implement Privacy Inspector stages.
+- [ ] Display entity counts, types, actions, policy version, and latency.
+- [ ] Add clear-session action.
+- [ ] Add synthetic prompt examples.
+- [ ] Add blocked, rate-limited, provider-timeout, and vault-failure states.
+- [ ] Prevent duplicate submission.
+- [ ] Do not automatically retry chat requests.
+
+### Acceptance criteria
+
+- A synthetic prompt containing a name and email produces a restored response.
+- The UI explains that the provider received protected placeholders.
+- No mapping values or complete tokens are visible.
+- Policy blocks are clearly distinguished from technical errors.
+- Chat content is not placed in URLs, analytics, console logs, or browser storage.
+- End-to-end tests cover the complete chat demonstration.
+
+---
+
+## 19. Phase 18 — Security and Operations Console
+
+### Tasks
+
+- [ ] Implement `/dashboard`.
+- [ ] Implement metric cards and charts.
+- [ ] Implement `/audit` and audit detail.
+- [ ] Implement `/sessions` and session detail when supporting endpoints exist.
+- [ ] Implement `/policies` in view-only mode first.
+- [ ] Implement `/providers`.
+- [ ] Implement `/health`.
+- [ ] Add safe filtering and pagination.
+- [ ] Add empty, loading, error, and unauthorized states.
+- [ ] Ensure tables never display raw prompt or response fields.
+- [ ] Add accessible chart summaries.
+
+### Supporting backend endpoints
+
+```text
+GET /v1/dashboard/summary
+GET /v1/audit
+GET /v1/audit/{request_id}
+GET /v1/sessions
+GET /v1/sessions/{session_id}
+GET /v1/policies
+GET /v1/providers
+GET /health/ready
+```
+
+### Acceptance criteria
+
+- Dashboard renders from API data or documented mock mode.
+- Audit and session pages contain metadata only.
+- Health does not reveal internal hosts or secrets.
+- Unauthorized roles cannot access administrator views.
+- Charts use bounded, aggregated data.
+
+---
+
+## 20. Phase 19 — Policy Manager and Architecture Experience
+
+### Tasks
+
+- [ ] Implement policy detail and version history.
+- [ ] Implement entity-action table.
+- [ ] Implement JSON preview and validation.
+- [ ] Save edits as a new version.
+- [ ] Add explicit confirmation for weaker controls.
+- [ ] Implement `/architecture`.
+- [ ] Present data flow, trust boundaries, token lifecycle, and fail-closed behavior.
+- [ ] Summarize selected ADRs.
+- [ ] Implement `/about` with project purpose and limitations.
+
+### Acceptance criteria
+
+- Existing policy versions remain immutable.
+- Invalid policies cannot be submitted.
+- Architecture page explains the project without exposing secrets.
+- The page distinguishes reversible tokenization from redaction.
+- Known limitations are presented honestly.
+
+---
+
+## 21. Phase 20 — Interview Demo Hardening
+
+### Tasks
+
+- [ ] Add local mock provider mode.
+- [ ] Add deterministic synthetic demo data.
+- [ ] Add one-command startup for frontend, gateway, Redis, PostgreSQL, and mock provider.
+- [ ] Add demo user and analyst credentials with minimal permissions.
+- [ ] Add reset and seed scripts.
+- [ ] Add graceful offline states.
+- [ ] Add screenshots to README.
+- [ ] Add `docs/demo-script.md`.
+- [ ] Add `docs/interview-talk-track.md`.
+- [ ] Run accessibility and responsive checks.
+- [ ] Run the complete demo repeatedly from a clean environment.
+
+### Acceptance criteria
+
+- A reviewer can run the project without a paid LLM key.
+- The main demo completes in under ten minutes.
+- All displayed data is synthetic.
+- No destructive administrator action is available to demo credentials.
+- README provides exact setup and demo instructions.
+
+---
+
+
+## 22. Phase 21 — Test Strategy
 
 ### Unit tests
 
@@ -940,7 +1084,7 @@ Ensure canaries never appear in:
 
 ---
 
-## 21. Phase 16 — Performance Tests
+## 23. Phase 22 — Performance Tests
 
 ### Scenarios
 
@@ -972,7 +1116,7 @@ Record:
 
 ---
 
-## 22. Error Codes
+## 24. Error Codes
 
 Implement at least:
 
@@ -1004,7 +1148,7 @@ Each code maps to one HTTP status and one safe public message.
 
 ---
 
-## 23. API Example
+## 25. API Example
 
 ```bash
 curl --request POST \
@@ -1037,7 +1181,7 @@ Follow-up can be sent to Avery Example at avery@example.test.
 
 ---
 
-## 24. Manual Security Verification Checklist
+## 26. Manual Security Verification Checklist
 
 Before release:
 
@@ -1060,7 +1204,7 @@ Before release:
 
 ---
 
-## 25. Release Criteria
+## 27. Release Criteria
 
 Version 1 may be tagged only when:
 
@@ -1078,7 +1222,7 @@ Version 1 may be tagged only when:
 
 ---
 
-## 26. Suggested Implementation Order by Pull Request
+## 28. Suggested Implementation Order by Pull Request
 
 1. `bootstrap-and-ci`
 2. `config-lifecycle-safe-logging`
@@ -1094,14 +1238,18 @@ Version 1 may be tagged only when:
 12. `public-api`
 13. `audit-and-privacy-regression`
 14. `metrics-health-observability`
-15. `docker-compose-hardening`
-16. `performance-and-release-docs`
+15. `frontend-bootstrap`
+16. `secure-chat-privacy-inspector`
+17. `security-operations-console`
+18. `policy-and-architecture-pages`
+19. `docker-compose-demo-hardening`
+20. `privacy-e2e-performance-release-docs`
 
 Each pull request must be independently testable and must not introduce a temporary insecure bypass.
 
 ---
 
-## 27. Claude Code Completion Prompt
+## 29. Claude Code Completion Prompt
 
 Use this prompt from the repository root:
 
@@ -1122,5 +1270,7 @@ Rules:
   privacy tests after each phase.
 - Do not continue to the next phase until the current phase passes.
 - Update this checklist as work is completed.
-- Do not implement streaming, dashboards, Kubernetes, or extra providers in v1.
+- Do not implement streaming, Kubernetes, extra providers, file processing, or features outside the documented interview UI scope in v1.
+- Implement frontend phases only after the backend privacy pipeline and its tests are complete.
+- Read `docs/frontend-architecture.md`, `docs/ui-wireframes.md`, `docs/demo-script.md`, and `docs/interview-talk-track.md` before implementing the frontend.
 ```

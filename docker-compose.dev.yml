@@ -1,0 +1,21 @@
+# Development override: publishes PostgreSQL and Redis to the host so the
+# gateway can be run outside a container against them.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis
+#
+# The base compose file deliberately does not publish these ports -- only the
+# gateway needs to reach them, and a database listening on a developer's network
+# interface is a bad default. Use this file only for local development, and
+# never as part of a deployed configuration.
+#
+# Both are bound to 127.0.0.1 explicitly, so they are reachable from this
+# machine and from nowhere else.
+
+services:
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
