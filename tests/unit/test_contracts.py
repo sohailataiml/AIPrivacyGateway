@@ -255,8 +255,8 @@ class TestDomainModels:
 
     def test_entity_mapping_repr_hides_the_original_value(self) -> None:
         mapping = EntityMapping(
-            token="[[SGW:EMAIL_ADDRESS:01J0000000000000000000000]]",
-            token_id="01J0000000000000000000000",
+            token="⟦SGW:EMAIL_ADDRESS:01J0000000000000000000AB⟧",
+            token_id="01J0000000000000000000AB",
             entity_type="EMAIL_ADDRESS",
             original_value="avery@example.test",
             normalized_hmac="deadbeef",
