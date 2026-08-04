@@ -25,7 +25,10 @@ from app.api.middleware import (
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
+from app.api.v1.chat import router as chat_router
+from app.api.v1.detect import router as detect_router
 from app.api.v1.health import router as health_router
+from app.api.v1.sessions import router as sessions_router
 from app.config.settings import Settings, get_settings
 from app.observability.logging import configure_logging, get_logger
 
@@ -100,6 +103,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.add_middleware(RequestIdMiddleware)
 
     application.include_router(health_router)
+    application.include_router(chat_router)
+    application.include_router(detect_router)
+    application.include_router(sessions_router)
     return application
 
 

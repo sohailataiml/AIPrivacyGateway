@@ -135,6 +135,21 @@ class PolicyService:
         """Drop every cached snapshot."""
         self._entries.clear()
 
+    async def snapshot_for(self, tenant_id: UUID) -> PolicySnapshot:
+        """Resolve the tenant's active policy without authorizing a route.
+
+        ``resolve`` is the request path: it also checks a provider and model
+        against the allowlist. Callers that genuinely have no route to authorize
+        -- ``POST /v1/detect`` inspects text and names no provider -- need the
+        snapshot alone, and forcing a provider argument on them would put a
+        meaningless required field in a public API contract.
+
+        This is deliberately not a way around the allowlist. It returns a policy
+        for reading entity actions and thresholds; it grants nothing. Anything
+        that will call a provider must go through ``resolve``.
+        """
+        return await self._active_snapshot(tenant_id)
+
     async def _active_snapshot(self, tenant_id: UUID) -> PolicySnapshot:
         now = self._clock()
         cached = self._entries.get(tenant_id)
