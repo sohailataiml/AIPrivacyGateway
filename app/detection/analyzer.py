@@ -15,8 +15,9 @@ here makes that a startup failure instead of a privacy regression.
 
 from __future__ import annotations
 
+import logging
 import threading
-from typing import Any
+from typing import Any, Final
 
 from app.detection.config import DetectionConfig
 from app.detection.recognizers import build_custom_recognizers
@@ -26,6 +27,32 @@ _EngineKey = tuple[str, tuple[str, ...]]
 
 _engine_cache: dict[_EngineKey, Any] = {}
 _engine_lock = threading.Lock()
+
+ANALYZER_LOGGER_NAMES: Final[tuple[str, ...]] = (
+    "presidio-analyzer",
+    "presidio_analyzer",
+)
+MIN_ANALYZER_LOG_LEVEL: Final[int] = logging.INFO
+
+
+def silence_analyzer_logging() -> None:
+    """Stop Presidio from emitting the text it is analyzing.
+
+    ``presidio-analyzer`` logs the surrounding context of each match at
+    ``DEBUG`` -- ``"Context list is: <value> ..."`` -- which is the original
+    text this gateway exists to keep out of the log stream. An operator raising
+    LOG_LEVEL to DEBUG to diagnose an unrelated problem would otherwise start
+    writing plaintext PII to stdout.
+
+    Raising the floor to ``INFO`` makes that impossible while leaving Presidio's
+    genuine warnings visible. Levels already at ``INFO`` or stricter are left
+    alone. This mirrors :func:`app.llm.base.silence_transport_logging`, which
+    does the same for the OpenAI SDK and httpx.
+    """
+    for name in ANALYZER_LOGGER_NAMES:
+        logger = logging.getLogger(name)
+        if logger.level == logging.NOTSET or logger.level < MIN_ANALYZER_LOG_LEVEL:
+            logger.setLevel(MIN_ANALYZER_LOG_LEVEL)
 
 
 def _cache_key(config: DetectionConfig) -> _EngineKey:
@@ -40,6 +67,12 @@ def build_analyzer_engine(config: DetectionConfig) -> Any:
             loaded. The public message names no path and no component version.
     """
     languages = sorted(config.supported_languages)
+
+    # Before anything analyzes text: Presidio logs the context around each match
+    # at DEBUG, so the floor has to be raised before the first analyze() call,
+    # not after.
+    silence_analyzer_logging()
+
     try:
         # Imported lazily: importing presidio pulls in spaCy, and modules that
         # only need the Protocol or the fake must not pay for that.
