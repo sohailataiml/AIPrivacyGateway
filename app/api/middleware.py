@@ -1,11 +1,13 @@
 """Request-scoped middleware.
 
-Three concerns, in the order they must run:
+Four concerns, in the order they must run:
 
 1. ``RequestIdMiddleware`` assigns the correlation id everything downstream logs.
-2. ``BodySizeLimitMiddleware`` rejects oversized bodies *before* detection,
+2. ``MetricsMiddleware`` counts and times every request, including the ones the
+   layers below reject.
+3. ``BodySizeLimitMiddleware`` rejects oversized bodies *before* detection,
    tokenization, or a provider call can spend time on them.
-3. ``SecurityHeadersMiddleware`` sets the headers that must be present on every
+4. ``SecurityHeadersMiddleware`` sets the headers that must be present on every
    response including error responses.
 
 A caller-supplied ``X-Request-ID`` is deliberately not trusted as-is: it is
@@ -27,11 +29,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.api.errors import REQUEST_ID_HEADER, error_response
 from app.domain.errors import ErrorCode
+from app.observability import metrics
 from app.observability.logging import get_logger
 
 logger = get_logger(__name__)
 
 CONTENT_LENGTH_HEADER = "content-length"
+HTTP_INTERNAL_SERVER_ERROR = 500
 
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
@@ -64,6 +68,59 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
 
         response.headers[REQUEST_ID_HEADER] = str(request_id)
         return response
+
+
+class MetricsMiddleware(BaseHTTPMiddleware):
+    """Count and time every request, labelled by route template.
+
+    Registered outside ``BodySizeLimitMiddleware`` so a rejected oversized body
+    still shows up as a request -- a spike of 413s is exactly the signal an
+    operator needs, and it would be invisible from inside that layer.
+
+    The route template is read *after* ``call_next`` returns, because that is
+    when the router has matched. Reading ``request.url.path`` instead would put
+    a caller-controlled string into a label; see ``app.observability.metrics``
+    for why that is the one thing this must not do.
+    """
+
+    async def dispatch(self, request: Request, call_next: RequestHandler) -> Response:
+        started = time.perf_counter()
+        status_code = HTTP_INTERNAL_SERVER_ERROR
+        with metrics.track_in_flight():
+            try:
+                response = await call_next(request)
+            except Exception:
+                # An exception escaping the handler chain is still a request
+                # that happened, and it is the one an operator most wants
+                # counted. Record it as a 500 -- which is what the exception
+                # handlers will turn it into -- then let it propagate.
+                _record(request, status=status_code, started=started)
+                raise
+            status_code = response.status_code
+            _record(request, status=status_code, started=started)
+            return response
+
+
+def _record(request: Request, *, status: int, started: float) -> None:
+    """Emit the HTTP metrics for one finished request."""
+    metrics.observe_request(
+        method=request.method,
+        route=_route_template(request),
+        status=status,
+        duration_seconds=metrics.elapsed_since(started),
+    )
+
+
+def _route_template(request: Request) -> str | None:
+    """Return the matched route's path template, or ``None`` if nothing matched.
+
+    ``getattr`` rather than attribute access: ``scope["route"]`` is a Starlette
+    ``Mount`` or ``WebSocketRoute`` in some configurations, and neither is
+    guaranteed to expose ``path``.
+    """
+    route = request.scope.get("route")
+    path = getattr(route, "path", None)
+    return path if isinstance(path, str) else None
 
 
 def _incoming_request_id(request: Request) -> UUID | None:

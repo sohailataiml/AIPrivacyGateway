@@ -37,6 +37,7 @@ from app.domain.models import (
 REAL_KEY = base64.b64encode(bytes(range(32))).decode()
 STRONG_PEPPER = "p" * 48
 STRONG_AUDIT_KEY = base64.b64encode(bytes(range(1, 33))).decode()
+STRONG_METRICS_TOKEN = "m" * 48
 
 
 def production_env(**overrides: str) -> dict[str, str]:
@@ -47,6 +48,7 @@ def production_env(**overrides: str) -> dict[str, str]:
         "AUDIT_HMAC_KEY": STRONG_AUDIT_KEY,
         "VAULT_ACTIVE_KEY_ID": "prod1",
         "VAULT_KEY_PROD1": REAL_KEY,
+        "METRICS_TOKEN": STRONG_METRICS_TOKEN,
     }
     env.update(overrides)
     return env
@@ -56,7 +58,9 @@ def production_env(**overrides: str) -> dict[str, str]:
 def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Run every settings test against a clean environment and no .env file."""
     for name in list(os.environ):
-        if name.startswith(("APP_", "VAULT_", "API_KEY_", "AUDIT_", "OPENAI_", "CORS_")):
+        if name.startswith(
+            ("APP_", "VAULT_", "API_KEY_", "AUDIT_", "OPENAI_", "CORS_", "METRICS_")
+        ):
             monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
     get_settings.cache_clear()
@@ -165,6 +169,8 @@ class TestProductionHardening:
             ({"VAULT_KEY_PROD1": "not-base64!!"}, "base64"),
             ({"DIAGNOSTICS_RETURN_MATCHED_TEXT": "true"}, "DIAGNOSTICS"),
             ({"CORS_ALLOWED_ORIGINS": "*"}, "CORS"),
+            ({"METRICS_TOKEN": "change-me"}, "METRICS_TOKEN"),
+            ({"METRICS_TOKEN": "short"}, "METRICS_TOKEN"),
         ],
     )
     def test_invalid_production_configuration_prevents_startup(
@@ -201,6 +207,42 @@ class TestProductionHardening:
         settings = Settings()
 
         assert settings.diagnostics_allowed is False
+
+    def test_production_refuses_an_unauthenticated_metrics_endpoint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        env = production_env()
+        del env["METRICS_TOKEN"]
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+
+        with pytest.raises(ValueError, match="METRICS_TOKEN"):
+            Settings()
+
+    def test_production_allows_metrics_to_be_switched_off_entirely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No endpoint needs no token. The rule is about what is exposed, not
+        about a variable being present."""
+        env = production_env(METRICS_ENABLED="false")
+        del env["METRICS_TOKEN"]
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+
+        settings = Settings()
+
+        assert settings.metrics_enabled is False
+        assert settings.metrics_token is None
+
+    def test_metrics_token_is_not_printed_by_repr(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name, value in production_env().items():
+            monkeypatch.setenv(name, value)
+
+        settings = Settings()
+
+        assert STRONG_METRICS_TOKEN not in repr(settings)
+        assert settings.metrics_token is not None
+        assert settings.metrics_token.get_secret_value() == STRONG_METRICS_TOKEN
 
     def test_local_defaults_use_the_mock_provider(self) -> None:
         settings = Settings()

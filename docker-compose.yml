@@ -33,6 +33,10 @@ services:
       VAULT_KEY_LOCAL1: bG9jYWwtY29tcG9zZS12YXVsdC1rZXktMzJieXRlcyE=
       AUDIT_HMAC_KEY: bG9jYWwtY29tcG9zZS1hdWRpdC1obWFjLTMyYnl0ZXMh
       DEFAULT_PROVIDER: mock
+      # Set even though APP_ENV=local would permit an open endpoint, so the
+      # scrape path this stack exercises is the same one a deployment uses.
+      METRICS_ENABLED: "true"
+      METRICS_TOKEN: local-compose-metrics-token-not-for-production-use
     ports:
       - "127.0.0.1:8000:8000"
     read_only: true

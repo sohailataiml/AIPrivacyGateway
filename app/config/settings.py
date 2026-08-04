@@ -106,6 +106,24 @@ class Settings(BaseSettings):
     audit_fail_closed: bool = True
     """When true, an audit write failure fails the request."""
 
+    # -- Observability ----------------------------------------------------
+    metrics_enabled: bool = True
+    """Whether ``GET /metrics`` is mounted at all.
+
+    A deployment that scrapes through a sidecar, or that has decided the
+    endpoint is not worth the surface area, turns it off here rather than
+    relying on the route being unreachable by accident.
+    """
+
+    metrics_token: SecretStr | None = None
+    """Bearer credential a scraper must present to read ``/metrics``.
+
+    Deliberately *not* an API key from the database: metrics are most valuable
+    when PostgreSQL is the thing that is broken, so the check guarding them must
+    not depend on it. Unset leaves the endpoint open, which production refuses
+    to start with.
+    """
+
     otel_exporter_otlp_endpoint: str | None = None
 
     # -- Validation -------------------------------------------------------
@@ -170,11 +188,30 @@ class Settings(BaseSettings):
         if "*" in self.cors_allowed_origins:
             problems.append("CORS_ALLOWED_ORIGINS must not be a wildcard in production")
 
+        if self.metrics_enabled and self.metrics_token is None:
+            # /metrics publishes request rates, error rates, and dependency
+            # health. That is a reconnaissance surface, and an unauthenticated
+            # one is not something a deployment should be able to ship by
+            # forgetting a variable.
+            problems.append("METRICS_TOKEN must be set when METRICS_ENABLED is true in production")
+
+        if self.metrics_token is not None:
+            problems.extend(self._metrics_token_problems(self.metrics_token))
+
         if problems:
             # Names of misconfigured variables only. No values.
             raise ValueError("invalid production configuration: " + "; ".join(problems))
 
         return self
+
+    @staticmethod
+    def _metrics_token_problems(token: SecretStr) -> list[str]:
+        raw = token.get_secret_value()
+        if raw in DEVELOPMENT_PLACEHOLDERS:
+            return ["METRICS_TOKEN is still a development placeholder"]
+        if len(raw) < MIN_SECRET_CHARS:
+            return [f"METRICS_TOKEN must be at least {MIN_SECRET_CHARS} characters"]
+        return []
 
     @staticmethod
     def _vault_key_problems(key: SecretStr) -> list[str]:

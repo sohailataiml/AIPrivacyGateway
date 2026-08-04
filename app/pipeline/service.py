@@ -32,7 +32,7 @@ The only per-request log line carries identifiers and counts.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Awaitable, Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
 
@@ -58,6 +58,7 @@ from app.domain.models import (
 )
 from app.llm.base import LLMProvider
 from app.llm.registry import ProviderRegistry
+from app.pipeline import metrics
 from app.pipeline.context import (
     DEFAULT_LANGUAGE,
     PipelineAttempt,
@@ -83,7 +84,7 @@ from app.pipeline.protocols import (
 )
 from app.pipeline.reporting import build_response, log_completion, record_failure, record_outcome
 from app.pipeline.session import resolve_session_id
-from app.pipeline.stages import PipelineStage, run_stage, stage_failure
+from app.pipeline.stages import PipelineStage, StageFailure, run_stage, stage_failure
 from app.policy.models import PolicySnapshot
 
 _POLICY_FAILURE = stage_failure(GatewayError)
@@ -91,6 +92,24 @@ _DETECTION_FAILURE = stage_failure(DetectorUnavailableError)
 _TOKENIZATION_FAILURE = stage_failure(VaultUnavailableError)
 _PROVIDER_FAILURE = stage_failure(ProviderUnavailableError, timeout_type=ProviderTimeoutError)
 _RESTORATION_FAILURE = stage_failure(RestorationError)
+
+
+async def _timed_stage[T](
+    awaitable: Awaitable[T],
+    *,
+    stage: PipelineStage,
+    deadline: float,
+    failure: StageFailure,
+) -> T:
+    """Run one stage under :func:`run_stage`, measured.
+
+    The timing lives here rather than inside ``run_stage`` so ``app.pipeline.
+    stages`` stays free of a metrics import: ``app.pipeline.metrics`` needs
+    ``PipelineStage``, and instrumenting the other direction would make the two
+    modules import each other.
+    """
+    with metrics.observe_stage(stage):
+        return await run_stage(awaitable, stage=stage, deadline=deadline, failure=failure)
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,6 +194,10 @@ class SecurePipeline:
             snapshot = await self._resolve_policy(attempt)
             completed = await self._run(request, attempt, snapshot)
         except GatewayError as exc:
+            # One place for every refusal, classified by error type. Keeps
+            # ``app.policy`` and ``app.pipeline.guards`` free of metrics imports
+            # and makes the reason label impossible for a raise site to invent.
+            metrics.record_refusal(exc)
             await record_failure(self._audit, attempt=attempt, snapshot=snapshot, error=exc)
             raise
         await record_outcome(
@@ -201,7 +224,7 @@ class SecurePipeline:
 
     # -- Stages -----------------------------------------------------------
     async def _resolve_policy(self, attempt: PipelineAttempt) -> PolicySnapshot:
-        return await run_stage(
+        return await _timed_stage(
             self._policy.resolve(
                 tenant_id=attempt.tenant_id,
                 provider=attempt.provider_alias,
@@ -267,7 +290,7 @@ class SecurePipeline:
         """
         results: list[tuple[DetectedEntity, ...]] = []
         for message in request.messages:
-            entities = await run_stage(
+            entities = await _timed_stage(
                 self._detector.detect(
                     message.content,
                     language=DEFAULT_LANGUAGE,
@@ -314,7 +337,7 @@ class SecurePipeline:
         messages: list[ChatMessage] = []
         summary = PrivacySummary()
         for message, entities in zip(request.messages, detections, strict=True):
-            transformed = await run_stage(
+            transformed = await _timed_stage(
                 self._tokenizer.transform(
                     tenant_id=context.principal.tenant_id,
                     session_id=context.session_id,
@@ -351,7 +374,7 @@ class SecurePipeline:
         attempt: PipelineAttempt,
     ) -> ProviderResponse:
         """Call the provider under the concurrency bound and the deadline."""
-        response = await run_stage(
+        response = await _timed_stage(
             self._bounded_complete(provider, protected),
             stage=PipelineStage.PROVIDER,
             deadline=attempt.deadline,
@@ -365,7 +388,13 @@ class SecurePipeline:
         # Acquired inside the deadline: waiting for a slot is part of the
         # request's budget, not additional to it.
         async with self._semaphore:
-            return await provider.complete(protected)
+            # Labelled by the adapter's registered alias, never by
+            # ``request.provider``: the two are equal here only because the
+            # registry already refused everything else, and reading it from the
+            # adapter means a future lookup change cannot put a caller-supplied
+            # string into a metric label.
+            with metrics.observe_provider_call(provider.alias):
+                return await provider.complete(protected)
 
     async def _restore(
         self,
@@ -374,7 +403,7 @@ class SecurePipeline:
         response: ProviderResponse,
         attempt: PipelineAttempt,
     ) -> RestoredOutputLike:
-        return await run_stage(
+        restored = await _timed_stage(
             self._output.restore(
                 tenant_id=context.principal.tenant_id,
                 session_id=context.session_id,
@@ -385,6 +414,11 @@ class SecurePipeline:
             deadline=attempt.deadline,
             failure=_RESTORATION_FAILURE,
         )
+        # A token the provider echoed that no mapping resolves. Counted here
+        # rather than in the restoration module because it is an operational
+        # signal about TTLs, and this is where the request's other counters are.
+        metrics.record_unknown_tokens(restored.summary.unknown_tokens)
+        return restored
 
     @property
     def _audit_required(self) -> bool:

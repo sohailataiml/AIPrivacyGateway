@@ -39,6 +39,7 @@ from app.domain.models import EntityAction, Scope, UnknownTokenAction
 from app.main import create_app
 from app.policy.models import POLICY_SCHEMA_VERSION, EntityRule, PolicyDocument, ProviderRule
 from app.repositories.api_keys import generate_api_key, prefix_of, verify_api_key
+from app.tokenization.grammar import LEFT_DELIMITER
 
 TENANT_A = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 TENANT_B = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
@@ -451,6 +452,80 @@ class TestDeleteSession:
 
         assert response.headers["Cache-Control"] == "no-store"
         assert UUID(response.headers["X-Request-ID"])
+
+
+# ---------------------------------------------------------------------------
+# GET /metrics
+# ---------------------------------------------------------------------------
+@pytest.mark.security
+class TestMetricsExposure:
+    """What a scrape reveals after real traffic has moved through the gateway.
+
+    The unit tests in ``test_observability.py`` prove each recorder folds its
+    labels. This proves the composition: a request carrying an email, a name, a
+    phone number, an SSN, and an IP goes through the whole stack, and then the
+    entire exposition payload is searched for any of it. The endpoint is the one
+    place every instrument's output is concatenated, so it is the right place to
+    check that none of them leaked.
+    """
+
+    async def test_a_real_request_leaves_no_sensitive_value_in_the_payload(
+        self, api: Api
+    ) -> None:
+        chat = await api.chat(api.keys.full_a)
+        assert chat.status_code == 200
+        session_id = chat.json()["session_id"]
+
+        payload = (await api.client.get("/metrics")).text
+
+        # The values themselves.
+        for value in (EMAIL, PERSON, PHONE, SSN, IP):
+            assert value not in payload, value
+        # The identifiers that would let a reader correlate series to a caller.
+        for identifier in (str(TENANT_A), str(TENANT_B), session_id):
+            assert identifier not in payload, identifier
+        # And any token minted for the values above.
+        assert LEFT_DELIMITER not in payload
+
+    async def test_a_real_request_is_actually_reflected_in_the_payload(
+        self, api: Api
+    ) -> None:
+        """The counterpart to the test above: absence proves nothing if the
+        instruments never fired."""
+        await api.chat(api.keys.full_a)
+
+        payload = (await api.client.get("/metrics")).text
+
+        assert 'sgw_http_requests_total{method="POST",route="/v1/chat",status="200"}' in payload
+        assert 'sgw_entities_detected_total{action="tokenize",entity_type="EMAIL_ADDRESS"}' in (
+            payload
+        )
+        assert 'sgw_provider_requests_total{provider="mock",result="success"}' in payload
+        assert 'sgw_pipeline_stage_total{outcome="success",stage="detection"}' in payload
+
+    async def test_a_blocked_request_is_counted_as_a_policy_block(self, api: Api) -> None:
+        """``US_SSN`` is a BLOCK rule in the test policy, so this request dies
+        before the vault. The refusal must still be visible."""
+        response = await api.chat(
+            api.keys.full_a, messages=[{"role": "user", "content": f"SSN {SSN}"}]
+        )
+        assert response.json()["error"]["code"] == "POLICY_VIOLATION"
+
+        payload = (await api.client.get("/metrics")).text
+
+        assert 'sgw_policy_blocks_total{reason="blocked_entity"}' in payload
+        assert SSN not in payload
+
+    async def test_the_route_label_is_the_template_not_the_session_id(self, api: Api) -> None:
+        """A session id in a label would be a new time series per delete, for
+        the life of the process, keyed by an identifier from the request path."""
+        session_id = uuid4()
+        assert (await api.delete(api.keys.delete_b, session_id)).status_code == 204
+
+        payload = (await api.client.get("/metrics")).text
+
+        assert 'route="/v1/sessions/{session_id}"' in payload
+        assert str(session_id) not in payload
 
 
 # ---------------------------------------------------------------------------

@@ -22,12 +22,14 @@ from app.api.composition import build_services, start_services, stop_services
 from app.api.errors import register_exception_handlers
 from app.api.middleware import (
     BodySizeLimitMiddleware,
+    MetricsMiddleware,
     RequestIdMiddleware,
     SecurityHeadersMiddleware,
 )
 from app.api.v1.chat import router as chat_router
 from app.api.v1.detect import router as detect_router
 from app.api.v1.health import router as health_router
+from app.api.v1.metrics import router as metrics_router
 from app.api.v1.sessions import router as sessions_router
 from app.config.settings import Settings, get_settings
 from app.observability.logging import configure_logging, get_logger
@@ -100,12 +102,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
         )
     application.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_bytes)
+    # Outside the size limit so a rejected oversized body is still counted, and
+    # inside the request id so a metric and a log line describe the same span.
+    application.add_middleware(MetricsMiddleware)
     application.add_middleware(RequestIdMiddleware)
 
     application.include_router(health_router)
     application.include_router(chat_router)
     application.include_router(detect_router)
     application.include_router(sessions_router)
+    if settings.metrics_enabled:
+        # Absent rather than forbidden when disabled: a route that exists and
+        # refuses still confirms the deployment has metrics worth asking for.
+        application.include_router(metrics_router)
     return application
 
 

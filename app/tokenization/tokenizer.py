@@ -18,7 +18,9 @@ span is spliced while its offsets are still valid.
 
 Nothing in this module logs. The values passing through are exactly the ones the
 gateway exists to protect, and the cheapest way to guarantee they are never
-logged is to have no logging statements at all.
+logged is to have no logging statements at all. The one observability call it
+does make, :func:`app.tokenization.metrics.record_plan`, is handed entity types
+and policy actions -- never the text of a span.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ from app.domain.models import (
     PrivacySummary,
     TransformedText,
 )
+from app.tokenization import metrics
 from app.tokenization.fingerprint import Fingerprinter
 from app.tokenization.grammar import Token, format_redaction, is_valid_token_id, parse_token
 from app.tokenization.normalization import normalize
@@ -96,6 +99,10 @@ class Tokenizer:
         selected = select_entities(text=text, entities=entities, policy=policy)
         self._enforce_limit(selected, policy)
         plan = tuple((entity, policy.action_for(entity.entity_type)) for entity in selected)
+        # Before the block check, so a blocked span is counted rather than
+        # vanishing along with the request it stopped. Type names and decision
+        # names only -- see app.tokenization.metrics.
+        metrics.record_plan(plan)
         _reject_blocked(plan)
 
         pieces: list[str] = []
