@@ -147,18 +147,18 @@ Use `uv` for dependency and environment management unless the existing project a
 
 ### Tasks
 
-- [ ] Create directory structure from `architecture.md`.
-- [ ] Initialize `pyproject.toml`.
-- [ ] Configure Ruff formatting and linting.
-- [ ] Configure mypy in strict or near-strict mode.
-- [ ] Configure pytest and coverage.
-- [ ] Add `.gitignore`.
-- [ ] Add `.env.example` with variable names and safe placeholders.
-- [ ] Add `Makefile`.
-- [ ] Add pre-commit configuration.
-- [ ] Add CI workflow for lint, type check, tests, dependency audit, and secret scan.
-- [ ] Add `README.md` with local setup instructions.
-- [ ] Add a minimal `app/main.py`.
+- [x] Create directory structure from `architecture.md`.
+- [x] Initialize `pyproject.toml`.
+- [x] Configure Ruff formatting and linting.
+- [x] Configure mypy in strict or near-strict mode.
+- [x] Configure pytest and coverage.
+- [x] Add `.gitignore`.
+- [x] Add `.env.example` with variable names and safe placeholders.
+- [x] Add `Makefile`.
+- [x] Add pre-commit configuration.
+- [x] Add CI workflow for lint, type check, tests, dependency audit, and secret scan.
+- [x] Add `README.md` with local setup instructions.
+- [x] Add a minimal `app/main.py`.
 
 ### Required files
 
@@ -189,17 +189,17 @@ tests/unit/test_bootstrap.py
 
 ### Tasks
 
-- [ ] Implement typed settings in `app/config/settings.py`.
-- [ ] Add environment profiles: `local`, `test`, `production`.
-- [ ] Validate required production secrets.
-- [ ] Configure FastAPI lifespan.
+- [x] Implement typed settings in `app/config/settings.py`.
+- [x] Add environment profiles: `local`, `test`, `production`.
+- [x] Validate required production secrets.
+- [x] Configure FastAPI lifespan.
 - [ ] Initialize Redis and PostgreSQL clients during startup.
 - [ ] Close resources during shutdown.
-- [ ] Add request ID middleware.
-- [ ] Add safe structured logging.
-- [ ] Add global exception handlers.
-- [ ] Add CORS disabled by default.
-- [ ] Add body-size enforcement.
+- [x] Add request ID middleware.
+- [x] Add safe structured logging.
+- [x] Add global exception handlers.
+- [x] Add CORS disabled by default.
+- [x] Add body-size enforcement.
 
 ### Settings rules
 
@@ -234,13 +234,13 @@ tests/unit/test_bootstrap.py
 
 ### Tasks
 
-- [ ] Configure async SQLAlchemy engine and sessions.
-- [ ] Configure Alembic.
-- [ ] Create migrations for tenants, API keys, policies, provider configs, and audit events.
-- [ ] Implement repository interfaces.
-- [ ] Add transaction helper.
-- [ ] Seed one local tenant and default policy through an idempotent script.
-- [ ] Store only provider secret references, never provider secrets.
+- [x] Configure async SQLAlchemy engine and sessions.
+- [x] Configure Alembic.
+- [x] Create migrations for tenants, API keys, policies, provider configs, and audit events.
+- [x] Implement repository interfaces.
+- [x] Add transaction helper.
+- [x] Seed one local tenant and default policy through an idempotent script.
+- [x] Store only provider secret references, never provider secrets.
 
 ### API key storage
 
@@ -275,16 +275,16 @@ Do not store the raw key.
 
 ### Tasks
 
-- [ ] Parse `Authorization: Bearer <api-key>`.
-- [ ] Resolve API key by prefix.
-- [ ] Verify its hash safely.
-- [ ] Reject expired, disabled, or unknown keys.
-- [ ] Construct immutable `Principal`.
-- [ ] Implement scope dependency.
-- [ ] Update `last_used_at` asynchronously or with bounded frequency.
-- [ ] Implement Redis-backed fixed-window or sliding-window rate limiting.
-- [ ] Rate limit by tenant and API key.
-- [ ] Add authentication and rate-limit metrics.
+- [x] Parse `Authorization: Bearer <api-key>`.
+- [x] Resolve API key by prefix.
+- [x] Verify its hash safely.
+- [x] Reject expired, disabled, or unknown keys.
+- [x] Construct immutable `Principal`.
+- [x] Implement scope dependency.
+- [x] Update `last_used_at` asynchronously or with bounded frequency.
+- [x] Implement Redis-backed fixed-window or sliding-window rate limiting.
+- [x] Rate limit by tenant and API key.
+- [x] Add authentication and rate-limit metrics.
 
 ### Security requirements
 
@@ -320,15 +320,15 @@ Do not store the raw key.
 
 ### Tasks
 
-- [ ] Define policy schema.
-- [ ] Implement default policy.
-- [ ] Implement tenant policy repository.
-- [ ] Resolve active policy snapshot per request.
-- [ ] Validate entity actions and thresholds.
-- [ ] Validate provider and model allowlists.
-- [ ] Add policy version to request context and audit metadata.
-- [ ] Cache policy documents briefly without caching secrets.
-- [ ] Add policy-validation command.
+- [x] Define policy schema.
+- [x] Implement default policy.
+- [x] Implement tenant policy repository.
+- [x] Resolve active policy snapshot per request.
+- [x] Validate entity actions and thresholds.
+- [x] Validate provider and model allowlists.
+- [x] Add policy version to request context and audit metadata.
+- [x] Cache policy documents briefly without caching secrets.
+- [x] Add policy-validation command.
 
 ### Example policy
 
@@ -368,20 +368,20 @@ Do not store the raw key.
 
 ### Tasks
 
-- [ ] Define detector interface and domain models.
-- [ ] Integrate Presidio analyzer.
-- [ ] Configure spaCy model through setup documentation.
-- [ ] Add custom regex recognizers for:
-  - [ ] API keys or bearer tokens.
-  - [ ] Medical record number sample format.
-  - [ ] Health plan identifier sample format.
-  - [ ] Enterprise account number sample format.
-- [ ] Add allowlist support.
-- [ ] Add confidence thresholds.
-- [ ] Implement deterministic overlap resolution.
-- [ ] Add language parameter with English enabled.
-- [ ] Add maximum-entity guard.
-- [ ] Record recognizer name only in diagnostic mode.
+- [x] Define detector interface and domain models.
+- [x] Integrate Presidio analyzer.
+- [x] Configure spaCy model through setup documentation.
+- [x] Add custom regex recognizers for:
+  - [x] API keys or bearer tokens.
+  - [x] Medical record number sample format.
+  - [x] Health plan identifier sample format.
+  - [x] Enterprise account number sample format.
+- [x] Add allowlist support.
+- [x] Add confidence thresholds.
+- [x] Implement deterministic overlap resolution.
+- [x] Add language parameter with English enabled.
+- [x] Add maximum-entity guard.
+- [x] Record recognizer name only in diagnostic mode.
 
 ### Detector input contract
 
@@ -435,16 +435,16 @@ Create synthetic fixtures only:
 
 ### Tasks
 
-- [ ] Define exact token grammar.
-- [ ] Implement cryptographically random token IDs.
-- [ ] Implement entity-specific normalization.
-- [ ] Implement HMAC fingerprinting.
-- [ ] Implement right-to-left replacement.
-- [ ] Implement action handlers for allow, tokenize, redact, pseudonymize, and block.
-- [ ] Return a protected type that cannot be confused with raw input.
-- [ ] Add repeated-value token reuse within a session.
-- [ ] Enforce maximum entity count.
-- [ ] Add property-based tests for offset safety.
+- [x] Define exact token grammar.
+- [x] Implement cryptographically random token IDs.
+- [x] Implement entity-specific normalization.
+- [x] Implement HMAC fingerprinting.
+- [x] Implement right-to-left replacement.
+- [x] Implement action handlers for allow, tokenize, redact, pseudonymize, and block.
+- [x] Return a protected type that cannot be confused with raw input.
+- [x] Add repeated-value token reuse within a session.
+- [x] Enforce maximum entity count.
+- [x] Add property-based tests for offset safety.
 
 ### Token grammar
 
@@ -477,18 +477,18 @@ Use a parser, not only a loose regex, for restoration.
 
 ### Tasks
 
-- [ ] Define vault interface.
-- [ ] Implement AES-256-GCM envelope encryption.
-- [ ] Load active key and key ring through settings.
-- [ ] Include associated data.
-- [ ] Implement token record storage.
-- [ ] Implement fingerprint-to-token index.
-- [ ] Implement atomic create-or-reuse operation using Lua or transaction.
-- [ ] Apply TTL to all keys.
-- [ ] Implement batch retrieval.
-- [ ] Implement session deletion.
-- [ ] Implement key-rotation-compatible decryption.
-- [ ] Add vault latency and result metrics.
+- [x] Define vault interface.
+- [x] Implement AES-256-GCM envelope encryption.
+- [x] Load active key and key ring through settings.
+- [x] Include associated data.
+- [x] Implement token record storage.
+- [x] Implement fingerprint-to-token index.
+- [x] Implement atomic create-or-reuse operation using Lua or transaction.
+- [x] Apply TTL to all keys.
+- [x] Implement batch retrieval.
+- [x] Implement session deletion.
+- [x] Implement key-rotation-compatible decryption.
+- [x] Add vault latency and result metrics.
 
 ### Vault interface
 
@@ -544,16 +544,16 @@ class TokenVault(Protocol):
 
 ### Tasks
 
-- [ ] Implement pipeline service.
-- [ ] Process system, user, and assistant message content.
-- [ ] Resolve one session ID.
-- [ ] Apply policy and detection.
-- [ ] Persist mappings before provider invocation.
-- [ ] Produce `ProtectedChatRequest`.
-- [ ] Add privacy metadata counters.
-- [ ] Add pipeline timeout.
-- [ ] Add bounded concurrency for provider calls.
-- [ ] Add fail-closed errors.
+- [x] Implement pipeline service.
+- [x] Process system, user, and assistant message content.
+- [x] Resolve one session ID.
+- [x] Apply policy and detection.
+- [x] Persist mappings before provider invocation.
+- [x] Produce `ProtectedChatRequest`.
+- [x] Add privacy metadata counters.
+- [x] Add pipeline timeout.
+- [x] Add bounded concurrency for provider calls.
+- [x] Add fail-closed errors.
 
 ### Pipeline pseudocode
 
@@ -604,17 +604,17 @@ async def invoke(raw_request: ChatRequest, principal: Principal) -> ChatResponse
 
 ### Tasks
 
-- [ ] Define provider registry.
-- [ ] Implement `OpenAIProvider`.
-- [ ] Map internal model alias to provider model ID.
-- [ ] Use the current official OpenAI text generation interface supported by the installed SDK.
-- [ ] Configure timeouts.
-- [ ] Configure bounded retry for transient network and selected `429` or `5xx` responses.
-- [ ] Disable storage where supported and required by policy.
-- [ ] Map provider errors into domain errors.
-- [ ] Capture usage metadata.
-- [ ] Add HTTP mocking with `respx` or SDK transport fakes.
-- [ ] Ensure provider client never logs request content.
+- [x] Define provider registry.
+- [x] Implement `OpenAIProvider`.
+- [x] Map internal model alias to provider model ID.
+- [x] Use the current official OpenAI text generation interface supported by the installed SDK.
+- [x] Configure timeouts.
+- [x] Configure bounded retry for transient network and selected `429` or `5xx` responses.
+- [x] Disable storage where supported and required by policy.
+- [x] Map provider errors into domain errors.
+- [x] Capture usage metadata.
+- [x] Add HTTP mocking with `respx` or SDK transport fakes.
+- [x] Ensure provider client never logs request content.
 
 ### Provider safety rules
 
@@ -651,16 +651,16 @@ async def invoke(raw_request: ChatRequest, principal: Principal) -> ChatResponse
 
 ### Tasks
 
-- [ ] Implement strict token parser.
-- [ ] Buffer and parse synchronous response.
-- [ ] Batch vault resolution.
-- [ ] Restore only complete exact tokens.
-- [ ] Preserve unknown tokens by default.
-- [ ] Add unknown-token count.
-- [ ] Enforce output-size limit.
-- [ ] Add optional output scan.
-- [ ] Reject malformed provider payloads.
-- [ ] Prevent recursive or repeated restoration errors.
+- [x] Implement strict token parser.
+- [x] Buffer and parse synchronous response.
+- [x] Batch vault resolution.
+- [x] Restore only complete exact tokens.
+- [x] Preserve unknown tokens by default.
+- [x] Add unknown-token count.
+- [x] Enforce output-size limit.
+- [x] Add optional output scan.
+- [x] Reject malformed provider payloads.
+- [x] Prevent recursive or repeated restoration errors.
 
 ### Restoration algorithm
 
@@ -703,8 +703,8 @@ async def invoke(raw_request: ChatRequest, principal: Principal) -> ChatResponse
 - [ ] `POST /v1/chat`
 - [ ] `POST /v1/detect`
 - [ ] `DELETE /v1/sessions/{session_id}`
-- [ ] `GET /health/live`
-- [ ] `GET /health/ready`
+- [x] `GET /health/live`
+- [x] `GET /health/ready` (shape only; real dependency checks are Phase 13)
 - [ ] `GET /metrics`
 
 ### `POST /v1/chat`
@@ -750,13 +750,13 @@ Requirements:
 
 ### Tasks
 
-- [ ] Implement audit event model and repository.
-- [ ] Add bounded asynchronous queue.
-- [ ] Record request outcome and privacy counts.
-- [ ] HMAC prompt and response for correlation.
-- [ ] Store policy version.
-- [ ] Add audit failure metric.
-- [ ] Add configurable fail-open or fail-closed audit behavior; production default should be explicit.
+- [x] Implement audit event model and repository.
+- [x] Add bounded asynchronous queue.
+- [x] Record request outcome and privacy counts.
+- [x] HMAC prompt and response for correlation.
+- [x] Store policy version.
+- [x] Add audit failure metric.
+- [x] Add configurable fail-open or fail-closed audit behavior; production default should be explicit.
 - [ ] Add retention documentation.
 
 ### Prohibited fields
@@ -838,17 +838,17 @@ Grafana is optional for version 1.
 
 ### Tasks
 
-- [ ] Create multi-stage Dockerfile.
-- [ ] Run as non-root.
-- [ ] Add health check.
-- [ ] Use read-only filesystem where practical.
-- [ ] Drop Linux capabilities.
-- [ ] Mount only required writable temporary directories.
-- [ ] Create Docker Compose configuration.
-- [ ] Add migration startup command or explicit documented migration step.
-- [ ] Add seed script.
-- [ ] Add local mock-provider option for demos.
-- [ ] Ensure local default does not accidentally call a paid provider.
+- [x] Create multi-stage Dockerfile.
+- [x] Run as non-root.
+- [x] Add health check.
+- [x] Use read-only filesystem where practical.
+- [x] Drop Linux capabilities.
+- [x] Mount only required writable temporary directories.
+- [x] Create Docker Compose configuration.
+- [x] Add migration startup command or explicit documented migration step.
+- [x] Add seed script.
+- [x] Add local mock-provider option for demos.
+- [x] Ensure local default does not accidentally call a paid provider.
 
 ### Acceptance criteria
 
