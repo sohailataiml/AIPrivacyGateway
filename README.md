@@ -19,8 +19,13 @@ See [architecture.md](architecture.md) for the full specification and
 
 ## Status
 
-Version 1 is under active construction. Phase completion is tracked in the
-checklists in `implementation.md`.
+Version 1 is under active construction. See **[PROGRESS.md](PROGRESS.md)** for
+what is built, what is not, the defects found during integration, and the known
+caveats. Per-task checkboxes live in [implementation.md](implementation.md).
+
+The HTTP API is not wired yet: only `/health/live` and `/health/ready` are
+registered. To see the privacy pipeline working today, run
+`python scripts/demo_pipeline.py`.
 
 ## Requirements
 
