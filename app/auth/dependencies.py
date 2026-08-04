@@ -43,6 +43,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated, Final, cast
 
 from fastapi import Depends, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.auth import metrics
@@ -152,8 +153,24 @@ def _last_used_writer(
     return None
 
 
+bearer_scheme = HTTPBearer(
+    scheme_name="ApiKey",
+    description="Gateway API key, issued by scripts/seed_local.py. Format: sgw_live_<random>.",
+    auto_error=False,
+)
+"""Declared purely so the OpenAPI schema records that these routes need a
+credential, which is what gives Swagger UI its Authorize button.
+
+``auto_error=False`` matters: FastAPI's own 403 for a missing header would
+bypass this package's error envelope and its uniform failure message. The
+credential is still read from the raw header by ``authenticate_bearer`` -- this
+parameter is documentation that happens to be enforced elsewhere.
+"""
+
+
 async def get_principal(
     request: Request,
+    _credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer_scheme)],
     authenticator: Annotated[ApiKeyAuthenticator, Depends(get_api_key_authenticator)],
     settings: Annotated[Settings, Depends(get_settings_for_request)],
     limiter: Annotated[RateLimiter, Depends(get_rate_limiter)],
