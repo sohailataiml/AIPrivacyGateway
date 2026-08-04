@@ -706,7 +706,7 @@ async def invoke(raw_request: ChatRequest, principal: Principal) -> ChatResponse
 - [x] `DELETE /v1/sessions/{session_id}`
 - [x] `GET /health/live`
 - [x] `GET /health/ready`
-- [ ] `GET /metrics`
+- [x] `GET /metrics`
 
 ### `POST /v1/chat`
 
@@ -795,13 +795,18 @@ Create a test that:
 
 ### Tasks
 
-- [ ] Add Prometheus metrics from architecture specification.
-- [ ] Add safe structured logs.
-- [ ] Add optional OpenTelemetry tracing.
-- [ ] Add readiness checks.
-- [ ] Add dependency status without exposing credentials or hosts.
+- [x] Add Prometheus metrics from architecture specification. (Two documented
+      deviations: `model` is not a provider label and `entity_type` is not a
+      vault label, both because those strings are caller-supplied at the point
+      of recording. See `docs/observability.md` §1.)
+- [x] Add safe structured logs.
+- [ ] Add optional OpenTelemetry tracing. (`OTEL_EXPORTER_OTLP_ENDPOINT` exists
+      in `Settings`; nothing reads it. No dependency, no instrumentation.)
+- [x] Add readiness checks.
+- [x] Add dependency status without exposing credentials or hosts.
 - [ ] Add sample Grafana dashboard JSON only if time permits.
-- [ ] Add alert recommendations to README.
+- [x] Add alert recommendations to README. (In `docs/observability.md` §4,
+      linked from the README index rather than inlined into it.)
 
 ### Suggested alerts
 
@@ -858,6 +863,15 @@ Grafana is optional for version 1.
 - Demo request works against mock provider.
 - Container runs as non-root.
 - Image does not include `.env`, tests containing secrets, or build caches.
+
+**Verified 2026-08-04, all five.** Cold start from an empty volume;
+`/health/ready` returns `{"redis":"up","database":"up"}`; a `POST /v1/chat`
+against the mock provider tokenized and restored two entities; the process runs
+as `uid=10001(gateway)`; `/app` contains only `alembic.ini`, `app`,
+`migrations`, and `scripts`. Getting there took four fixes — see PROGRESS.md
+§3, defects 8–11. The migration step is `make compose-migrate`, which runs
+inside the stack: the compose database publishes no host port, so the host-run
+`make migrate` cannot reach it.
 
 ---
 
