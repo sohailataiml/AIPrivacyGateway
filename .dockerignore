@@ -1,0 +1,26 @@
+# Keep secrets, tests, and build noise out of the image and the build context.
+.env
+.env.*
+!.env.example
+.venv/
+.git/
+.github/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+__pycache__/
+*.py[cod]
+tests/
+reports/
+docs/
+deploy/
+*.md
+!README.md
+Makefile
+tasks.py
+docker-compose.yml
+Dockerfile
+.pre-commit-config.yaml
