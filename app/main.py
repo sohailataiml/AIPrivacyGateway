@@ -4,6 +4,10 @@ The middleware order below is deliberate. Starlette applies middleware in
 reverse registration order, so registering request-id last makes it the
 outermost layer -- every other layer, including the body-size rejection, can
 then reference a request id that already exists.
+
+Wiring lives in :mod:`app.api.composition`; this module only decides *when* it
+happens. Services are built and connected during startup so that an unreachable
+Redis or PostgreSQL fails the deploy rather than every subsequent request.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.composition import build_services, start_services, stop_services
 from app.api.errors import register_exception_handlers
 from app.api.middleware import (
     BodySizeLimitMiddleware,
@@ -31,15 +36,34 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Open shared resources on startup and close them on shutdown.
 
-    Redis, PostgreSQL, and the detector engine are attached here as their
-    packages land. Whatever is opened must be closed in the finally block --
-    a leaked connection pool outlives the process that made it.
+    ``app.state`` is populated with the individual collaborators as well as the
+    ``Services`` bundle, because ``app.auth.dependencies`` reads ``redis``,
+    ``db_session_factory``, ``rate_limiter`` and ``settings`` off state by name.
+    Missing any of them makes authentication fail closed, which is the correct
+    behaviour but a confusing way to discover a wiring mistake.
     """
     settings: Settings = app.state.settings
     logger.info("startup", reason=settings.app_env.value)
+
+    services = getattr(app.state, "services", None) or await build_services(settings)
+    try:
+        await start_services(services)
+    except Exception:
+        # Startup got far enough to open handles before failing. Release them,
+        # then let the failure propagate so the process does not serve traffic.
+        await stop_services(services)
+        logger.error("startup_failed")
+        raise
+
+    app.state.services = services
+    app.state.redis = services.redis
+    app.state.db_session_factory = services.session_factory
+    app.state.rate_limiter = services.rate_limiter
+
     try:
         yield
     finally:
+        await stop_services(services)
         logger.info("shutdown")
 
 
