@@ -116,3 +116,69 @@ class TestBlockingRulesStillFire:
         kept = surviving(entities, policy, "US_SSN")
         assert kept
         assert policy.action_for("US_SSN") is EntityAction.BLOCK
+
+
+# Every one of these was verified missing against the running stack before
+# InternalEmailRecognizer existed: Presidio validates each match with
+# tldextract against the Public Suffix List and silently drops anything whose
+# TLD is not on it. ``.internal`` is the load-bearing case -- ICANN reserved it
+# in 2024 as the recommended private-network TLD, so it is precisely what an
+# enterprise deploying this gateway internally would be using.
+PRIVATE_TLD_EMAILS = [
+    "mail jordan.rivera@acme.internal about the outage",
+    "mail jordan.rivera@acme.lan about the outage",
+    "mail jordan.rivera@acme.corp about the outage",
+    "mail jordan.rivera@example.test about the outage",
+    "mail jordan.rivera@example.invalid about the outage",
+]
+
+PUBLIC_TLD_EMAILS = [
+    "mail jordan.rivera@example.com about the outage",
+    "mail jordan.rivera@example.org about the outage",
+    "mail jordan.rivera@example.io about the outage",
+]
+
+
+class TestEmailDetectionDoesNotDependOnATldList:
+    """A privacy control must not fail open on TLDs nobody remembered.
+
+    These are regression tests for a leak found by running the stack, not by
+    the unit suite -- which never caught it because its fixtures use a fake
+    detector, and whose own sample addresses are ``@example.test``: one of the
+    TLDs that silently failed to detect.
+    """
+
+    @pytest.mark.parametrize("text", PRIVATE_TLD_EMAILS)
+    async def test_private_and_reserved_tlds_are_detected(
+        self, detector: PresidioDetector, policy: PolicySnapshot, text: str
+    ) -> None:
+        entities = await detector.detect(text, language="en")
+
+        kept = surviving(entities, policy, "EMAIL_ADDRESS")
+        assert kept, (
+            f"no EMAIL_ADDRESS survives the default policy for {text!r}; "
+            f"an address on a private TLD would reach the provider in clear text"
+        )
+
+    @pytest.mark.parametrize("text", PUBLIC_TLD_EMAILS)
+    async def test_public_tlds_still_detected_exactly_once(
+        self, detector: PresidioDetector, policy: PolicySnapshot, text: str
+    ) -> None:
+        """Presidio and the custom recognizer both fire on a public address;
+        overlap resolution must collapse them to a single span rather than
+        tokenizing the same value twice."""
+        entities = await detector.detect(text, language="en")
+
+        kept = surviving(entities, policy, "EMAIL_ADDRESS")
+        assert len(kept) == 1, f"expected exactly one EMAIL_ADDRESS span, got {kept}"
+
+    async def test_the_address_is_tokenized_not_merely_detected(
+        self, detector: PresidioDetector, policy: PolicySnapshot
+    ) -> None:
+        entities = await detector.detect(
+            "mail jordan.rivera@acme.internal about the outage", language="en"
+        )
+
+        kept = surviving(entities, policy, "EMAIL_ADDRESS")
+        assert kept
+        assert policy.action_for("EMAIL_ADDRESS") is EntityAction.TOKENIZE

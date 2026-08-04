@@ -26,13 +26,20 @@ Real components, not mocks, for every stage that exists today:
 
 Why the fake detector
 ---------------------
-The three canary strings from implementation.md section 20 are *not shaped like
-the values their names suggest*, and the real detector finds none of them.
-``TestRealDetectorCoverage`` proves that rather than asserting it: Presidio
-returns zero entities for all three. The reasons differ per canary --
-``123-45-6789`` is a published placeholder Presidio hard-rejects (see
-``tests/fixtures/detection_corpus.py``), and ``SENSITIVE_CANARY_NAME_Avery
-Example`` is not a name any NER model will accept -- but the effect is the same.
+Two of the three canary strings from implementation.md section 20 are *not
+shaped like the values their names suggest*, and the real detector finds
+neither. ``TestRealDetectorCoverage`` proves that rather than asserting it.
+The reasons differ per canary -- ``123-45-6789`` is a published placeholder
+Presidio hard-rejects (see ``tests/fixtures/detection_corpus.py``), and
+``SENSITIVE_CANARY_NAME_Avery Example`` is not a name any NER model will
+accept -- but the effect is the same.
+
+The email canary is the exception, and it moved: it used to be invisible to the
+real detector too, because its ``@example.test`` address is on a TLD absent
+from the Public Suffix List and Presidio validates every match against that
+list. ``InternalEmailRecognizer`` now catches it, so
+:data:`REAL_DETECTOR_COVERS` records it as genuinely covered rather than
+leaving a passing test that asserts a leak.
 
 Rather than weaken the canaries or the assertions, this file does both things
 the brief allows:
@@ -99,6 +106,14 @@ CANARY_EMAIL: Final = "SENSITIVE_CANARY_EMAIL_7f91@example.test"
 CANARY_SSN: Final = "SENSITIVE_CANARY_SSN_123-45-6789"
 CANARY_NAME: Final = "SENSITIVE_CANARY_NAME_Avery Example"
 CANARIES: Final[tuple[str, ...]] = (CANARY_EMAIL, CANARY_SSN, CANARY_NAME)
+
+REAL_DETECTOR_COVERS: Final[frozenset[str]] = frozenset({CANARY_EMAIL})
+"""Canaries the shipped detector genuinely recognizes on its own.
+
+Membership here is a coverage record, not a configuration knob. A canary joins
+this set only when the real detector starts seeing it -- which is a strict
+improvement, since until then the canary flow could only be exercised with
+``FakeDetector``."""
 
 # Realistic values, for the run against the real detector. Every one is
 # synthetic; see tests/fixtures/detection_corpus.py for the provenance rules.
@@ -528,14 +543,15 @@ def presidio() -> PresidioDetector:
 class TestRealDetectorCoverage:
     """What the shipped detector can and cannot see, asserted rather than assumed."""
 
-    @pytest.mark.parametrize("canary", CANARIES)
+    @pytest.mark.parametrize("canary", sorted(set(CANARIES) - REAL_DETECTOR_COVERS))
     async def test_presidio_does_not_recognize_the_canary(
         self, presidio: PresidioDetector, canary: str
     ) -> None:
         """Documents the gap that justifies ``FakeDetector`` above.
 
         If a future detector upgrade starts recognizing one of these, this test
-        fails and the canary run should switch to the real engine for it.
+        fails and the canary should move into :data:`REAL_DETECTOR_COVERS` --
+        which is what happened to the email canary.
         """
         # Arrange
         prompt = f"Reference {canary} in the file."
@@ -546,7 +562,30 @@ class TestRealDetectorCoverage:
         # Assert
         covered = [prompt[entity.start : entity.end] for entity in found]
         assert not any(part in canary for part in covered), (
-            f"the real detector now sees {covered!r}; move this canary to the real engine"
+            f"the real detector now sees {covered!r}; add this canary to REAL_DETECTOR_COVERS"
+        )
+
+    @pytest.mark.parametrize("canary", sorted(REAL_DETECTOR_COVERS))
+    async def test_the_real_detector_covers_what_it_claims_to(
+        self, presidio: PresidioDetector, canary: str
+    ) -> None:
+        """The other half of the record above.
+
+        Without this, a recognizer regression would silently move a canary back
+        into the fake-detector-only column and every remaining test would still
+        pass -- the leak reappears and nothing says so.
+        """
+        # Arrange
+        prompt = f"Reference {canary} in the file."
+
+        # Act
+        found = await presidio.detect(prompt)
+
+        # Assert
+        covered = [prompt[entity.start : entity.end] for entity in found]
+        assert any(part in canary for part in covered), (
+            f"the real detector no longer sees {canary!r}; it is listed in "
+            f"REAL_DETECTOR_COVERS, so this is a detection regression"
         )
 
     async def test_realistic_values_never_leave_the_gateway(
