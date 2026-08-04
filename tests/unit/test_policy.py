@@ -152,7 +152,7 @@ def test_default_policy_matches_the_documented_example() -> None:
         "providers": {"openai-primary": {"models": ["general-chat"]}},
         "entities": {
             "EMAIL_ADDRESS": {"action": "tokenize", "min_score": 0.7},
-            "PHONE_NUMBER": {"action": "tokenize", "min_score": 0.65},
+            "PHONE_NUMBER": {"action": "tokenize", "min_score": 0.4},
             "US_SSN": {"action": "block", "min_score": 0.5},
             "CREDIT_CARD": {"action": "block", "min_score": 0.5},
             "PERSON": {"action": "tokenize", "min_score": 0.75},

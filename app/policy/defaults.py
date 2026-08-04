@@ -38,7 +38,16 @@ DEFAULT_POLICY: Final[PolicyDocument] = PolicyDocument(
         # Contactable identifiers: reversible, so the assistant's answer can be
         # restored for the caller who already knows the value.
         "EMAIL_ADDRESS": EntityRule(action=EntityAction.TOKENIZE, min_score=0.7),
-        "PHONE_NUMBER": EntityRule(action=EntityAction.TOKENIZE, min_score=0.65),
+        # 0.40, not the 0.65 originally specified. Presidio scores a US phone
+        # number at 0.40 unless the literal word "phone" or "telephone" sits
+        # nearby, so a 0.65 floor discarded every phone number in text like
+        # "Call 415-555-0142" and passed it to the provider in the clear.
+        #
+        # The low threshold is right for a reversible action: a false positive
+        # costs almost nothing, because the caller gets the original value back
+        # in the restored response. A missed phone number leaks permanently.
+        # Set the floor by what a mistake costs, not by detector confidence.
+        "PHONE_NUMBER": EntityRule(action=EntityAction.TOKENIZE, min_score=0.4),
         # Regulated identifiers: never leave the gateway in any form.
         "US_SSN": EntityRule(action=EntityAction.BLOCK, min_score=0.5),
         "CREDIT_CARD": EntityRule(action=EntityAction.BLOCK, min_score=0.5),
