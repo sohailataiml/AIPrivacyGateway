@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # No provider credentials exist in CI. The mock provider is the only one
+  # reachable, which guarantees no test can make a paid external call.
+  APP_ENV: test
+  UV_LINK_MODE: copy
+
+jobs:
+  quality:
+    name: lint / typecheck / unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Cache spaCy model
+        id: spacy-cache
+        uses: actions/cache@v4
+        with:
+          path: .venv/lib/python3.12/site-packages/en_core_web_lg
+          key: spacy-en_core_web_lg-${{ hashFiles('uv.lock') }}
+
+      - name: Download spaCy model
+        if: steps.spacy-cache.outputs.cache-hit != 'true'
+        run: uv run python -m spacy download en_core_web_lg
+
+      - run: uv run ruff format --check app tests scripts
+      - run: uv run ruff check app tests scripts
+      - run: uv run mypy app
+      - run: uv run pytest tests/unit --cov=app --cov-report=xml
+
+  integration:
+    name: integration / privacy / security
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: gateway
+          POSTGRES_PASSWORD: gateway
+          POSTGRES_DB: gateway_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U gateway"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql+asyncpg://gateway:gateway@localhost:5432/gateway_test
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --all-extras
+      - run: uv run python -m spacy download en_core_web_lg
+      - run: uv run alembic upgrade head
+      - run: uv run pytest tests/integration -m integration
+      - run: uv run pytest tests/privacy -m privacy
+      - run: uv run pytest tests/security -m security
+
+  security-scan:
+    name: dependency and secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --all-extras
+
+      - name: Static security analysis
+        run: uv run bandit -q -r app
+
+      - name: Dependency vulnerabilities
+        run: uv run pip-audit
+
+      - name: Secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
