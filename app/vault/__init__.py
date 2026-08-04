@@ -11,6 +11,8 @@ Public surface:
 
 from __future__ import annotations
 
+from app.tokenization.grammar import format_token, parse_token
+from app.tokenization.ids import new_token_id
 from app.vault.crypto import (
     ENVELOPE_VERSION,
     NONCE_BYTES,
@@ -23,7 +25,6 @@ from app.vault.keys import SettingsKeyRing, StaticKeyRing, VaultKeyRing
 from app.vault.protocol import TokenVault
 from app.vault.records import RECORD_SCHEMA_VERSION, VaultRecord
 from app.vault.redis_vault import DEFAULT_KEY_PREFIX, RedisTokenVault
-from app.vault.tokens import format_token, new_token_id, parse_token
 
 __all__ = [
     "DEFAULT_KEY_PREFIX",

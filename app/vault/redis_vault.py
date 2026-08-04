@@ -33,6 +33,8 @@ from uuid import UUID
 from redis.exceptions import RedisError
 
 from app.domain.errors import VaultEncryptionError, VaultUnavailableError
+from app.tokenization.grammar import format_token, parse_token
+from app.tokenization.ids import new_token_id
 from app.vault.crypto import EnvelopeCipher, VaultAad
 from app.vault.metrics import (
     OPERATION_DELETE_SESSION,
@@ -47,7 +49,7 @@ from app.vault.metrics import (
     token_lookups,
 )
 from app.vault.records import VaultRecord
-from app.vault.tokens import format_token, new_token_id, parse_token, validate_entity_type
+from app.vault.tokens import validate_entity_type
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
@@ -164,7 +166,7 @@ class RedisTokenVault:
             # re-encrypt, and an encryption failure must not leave a half-open
             # transaction behind.
             candidate_id = new_token_id()
-            candidate_token = format_token(entity_type=entity_type, token_id=candidate_id)
+            candidate_token = format_token(entity_type, candidate_id)
             candidate_key = self._token_key(session_prefix, candidate_id)
             envelope = self._seal(
                 tenant_id=tenant_id,
@@ -182,7 +184,7 @@ class RedisTokenVault:
                     reused = _as_text(existing)
                     parsed = parse_token(reused)
                     if parsed is not None:
-                        reused_key = self._token_key(session_prefix, parsed[1])
+                        reused_key = self._token_key(session_prefix, parsed.token_id)
                         if await pipe.exists(reused_key):
                             # redis-py leaves multi() unannotated.
                             pipe.multi()  # type: ignore[no-untyped-call]
@@ -226,7 +228,7 @@ class RedisTokenVault:
                 parsed = parse_token(token)
                 if parsed is None:
                     continue
-                entity_type, token_id = parsed
+                entity_type, token_id = parsed.entity_type, parsed.token_id
                 wanted.append((token, entity_type, token_id))
 
             if not wanted:

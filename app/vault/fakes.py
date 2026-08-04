@@ -23,7 +23,9 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from app.domain.errors import GatewayError
-from app.vault.tokens import format_token, new_token_id, parse_token, validate_entity_type
+from app.tokenization.grammar import format_token, parse_token
+from app.tokenization.ids import new_token_id
+from app.vault.tokens import validate_entity_type
 
 if TYPE_CHECKING:
     from app.domain.errors import GatewayError as _GatewayError
@@ -97,12 +99,12 @@ class InMemoryTokenVault:
             existing = session.index.get((entity_type, normalized_hmac))
             if existing is not None:
                 parsed = parse_token(existing)
-                if parsed is not None and parsed[1] in session.records:
-                    session.records[parsed[1]].expires_at = expires_at
+                if parsed is not None and parsed.token_id in session.records:
+                    session.records[parsed.token_id].expires_at = expires_at
                     return existing
 
             token_id = new_token_id()
-            token = format_token(entity_type=entity_type, token_id=token_id)
+            token = format_token(entity_type, token_id)
             session.records[token_id] = _Entry(
                 token=token,
                 entity_type=entity_type,
@@ -132,7 +134,7 @@ class InMemoryTokenVault:
                 parsed = parse_token(token)
                 if parsed is None:
                     continue
-                entry = session.records.get(parsed[1])
+                entry = session.records.get(parsed.token_id)
                 if entry is None or entry.token != token:
                     continue
                 resolved[token] = entry.original_value

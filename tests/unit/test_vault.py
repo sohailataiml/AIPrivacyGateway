@@ -22,6 +22,8 @@ import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.domain.errors import VaultEncryptionError, VaultUnavailableError
+from app.tokenization.grammar import Token, format_token, parse_token
+from app.tokenization.ids import new_token_id
 from app.vault.crypto import (
     ENVELOPE_MAGIC,
     ENVELOPE_VERSION,
@@ -35,7 +37,6 @@ from app.vault.keys import StaticKeyRing
 from app.vault.protocol import TokenVault
 from app.vault.records import VaultRecord
 from app.vault.redis_vault import DEFAULT_KEY_PREFIX, RedisTokenVault
-from app.vault.tokens import format_token, new_token_id, parse_token
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -136,22 +137,22 @@ class TestTokenGrammar:
         token_id = "01J8Z6J4M7Y9Q2K3T4V5W6X7Y8"
 
         # Act
-        token = format_token(entity_type="EMAIL_ADDRESS", token_id=token_id)
+        token = format_token("EMAIL_ADDRESS", token_id)
 
         # Assert
         assert token == f"⟦SGW:EMAIL_ADDRESS:{token_id}⟧"
 
     def test_parses_a_token_back_into_its_components(self) -> None:
         # Arrange
-        token = format_token(entity_type="PERSON", token_id=new_token_id())
+        token = format_token("PERSON", new_token_id())
 
         # Act
         parsed = parse_token(token)
 
         # Assert
         assert parsed is not None
-        assert parsed[0] == "PERSON"
-        assert len(parsed[1]) == 26
+        assert parsed.entity_type == "PERSON"
+        assert len(parsed.token_id) == 26
 
     @pytest.mark.parametrize(
         "candidate",
@@ -169,8 +170,8 @@ class TestTokenGrammar:
         hostile = "EMAIL:../../other"
 
         # Act / Assert
-        with pytest.raises(ValueError, match="entity_type"):
-            format_token(entity_type=hostile, token_id=new_token_id())
+        with pytest.raises(ValueError, match=r"entity[ _]type"):
+            format_token(hostile, new_token_id())
 
     def test_generated_token_ids_are_not_sequential(self) -> None:
         # Arrange / Act
@@ -346,7 +347,7 @@ class TestVaultRecord:
         record = VaultRecord(
             tenant_id=TENANT,
             session_id=SESSION,
-            token=format_token(entity_type="EMAIL_ADDRESS", token_id=new_token_id()),
+            token=format_token("EMAIL_ADDRESS", new_token_id()),
             entity_type="EMAIL_ADDRESS",
             original_value=EMAIL,
             created_at=now,
@@ -389,7 +390,7 @@ class TestVaultRecord:
         record = VaultRecord(
             tenant_id=TENANT,
             session_id=SESSION,
-            token=format_token(entity_type="EMAIL_ADDRESS", token_id=new_token_id()),
+            token=format_token("EMAIL_ADDRESS", new_token_id()),
             entity_type="EMAIL_ADDRESS",
             original_value=EMAIL,
             created_at=now,
@@ -476,7 +477,7 @@ class TestRedisVaultBehaviour:
         token = await store_email(vault)
 
         # Assert
-        assert parse_token(token) == ("EMAIL_ADDRESS", token[-27:-1])
+        assert parse_token(token) == Token("EMAIL_ADDRESS", token[-27:-1])
 
     async def test_repeated_value_in_one_session_reuses_its_token(
         self, vault: RedisTokenVault
@@ -558,7 +559,7 @@ class TestRedisVaultBehaviour:
     ) -> None:
         # Arrange
         real = await store_email(vault)
-        stranger = format_token(entity_type="EMAIL_ADDRESS", token_id=new_token_id())
+        stranger = format_token("EMAIL_ADDRESS", new_token_id())
 
         # Act
         resolved = await vault.resolve_many(
@@ -587,7 +588,7 @@ class TestRedisVaultBehaviour:
         self, vault: RedisTokenVault
     ) -> None:
         # Act / Assert
-        with pytest.raises(ValueError, match="entity_type"):
+        with pytest.raises(ValueError, match=r"entity[ _]type"):
             await store_email(vault, entity_type="EMAIL:evil")
 
     async def test_reuse_refreshes_the_ttl_of_the_existing_record(
@@ -597,7 +598,7 @@ class TestRedisVaultBehaviour:
         token = await store_email(vault, ttl_seconds=60)
         parsed = parse_token(token)
         assert parsed is not None
-        record_key = f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed[1]}"
+        record_key = f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed.token_id}"
 
         # Act
         await store_email(vault, ttl_seconds=600)
@@ -612,7 +613,9 @@ class TestRedisVaultBehaviour:
         first = await store_email(vault)
         parsed = parse_token(first)
         assert parsed is not None
-        await redis_client.delete(f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed[1]}")
+        await redis_client.delete(
+            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed.token_id}"
+        )
 
         # Act
         second = await store_email(vault)
@@ -789,8 +792,8 @@ class TestVaultSecurity:
         token = await store_email(vault)
         parsed = parse_token(token)
         assert parsed is not None
-        source = f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed[1]}"
-        target = f"{DEFAULT_KEY_PREFIX}:{OTHER_TENANT}:{SESSION}:token:{parsed[1]}"
+        source = f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed.token_id}"
+        target = f"{DEFAULT_KEY_PREFIX}:{OTHER_TENANT}:{SESSION}:token:{parsed.token_id}"
         envelope = await redis_client.get(source)
         assert envelope is not None
         await redis_client.set(target, envelope, ex=TTL)
@@ -807,11 +810,13 @@ class TestVaultSecurity:
         parsed = parse_token(token)
         assert parsed is not None
         envelope = await redis_client.get(
-            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed[1]}"
+            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed.token_id}"
         )
         assert envelope is not None
         await redis_client.set(
-            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{OTHER_SESSION}:token:{parsed[1]}", envelope, ex=TTL
+            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{OTHER_SESSION}:token:{parsed.token_id}",
+            envelope,
+            ex=TTL,
         )
 
         # Act / Assert
@@ -826,11 +831,11 @@ class TestVaultSecurity:
         parsed = parse_token(token)
         assert parsed is not None
         envelope = await redis_client.get(
-            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed[1]}"
+            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed.token_id}"
         )
         assert envelope is not None
         # Same token id, PERSON in place of EMAIL_ADDRESS.
-        relabelled = format_token(entity_type="PERSON", token_id=parsed[1])
+        relabelled = format_token("PERSON", parsed.token_id)
 
         # Act / Assert
         with pytest.raises(VaultEncryptionError):
@@ -843,7 +848,7 @@ class TestVaultSecurity:
         token = await store_email(vault)
         parsed = parse_token(token)
         assert parsed is not None
-        key = f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed[1]}"
+        key = f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed.token_id}"
         stored = bytearray(await redis_client.get(key) or b"")
         stored[-1] ^= 0xFF
         await redis_client.set(key, bytes(stored), ex=TTL)
@@ -878,7 +883,7 @@ class TestVaultSecurity:
         parsed = parse_token(token)
         assert parsed is not None
         await client.set(
-            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed[1]}", "mangled", ex=TTL
+            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed.token_id}", "mangled", ex=TTL
         )
         reader = RedisTokenVault(client, cipher)
 
@@ -1015,7 +1020,7 @@ class TestVaultSecurity:
         token = await store_email(vault)
         parsed = parse_token(token)
         assert parsed is not None
-        key = f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed[1]}"
+        key = f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{parsed.token_id}"
         stored = bytearray(await redis_client.get(key) or b"")
         stored[-2] ^= 0xFF
         await redis_client.set(key, bytes(stored), ex=TTL)
@@ -1045,10 +1050,10 @@ class TestVaultSecurity:
 
         # Act
         left = await redis_client.get(
-            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{first_id[1]}"
+            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:{first_id.token_id}"
         )
         right = await redis_client.get(
-            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{OTHER_SESSION}:token:{second_id[1]}"
+            f"{DEFAULT_KEY_PREFIX}:{TENANT}:{OTHER_SESSION}:token:{second_id.token_id}"
         )
 
         # Assert
