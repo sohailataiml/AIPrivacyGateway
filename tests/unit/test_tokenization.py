@@ -30,7 +30,12 @@ from app.domain.errors import (
     InvalidRequestError,
     PolicyViolationError,
 )
-from app.domain.models import DetectedEntity, EntityAction, TransformedText
+from app.domain.models import (
+    DetectedEntity,
+    EntityAction,
+    TransformedText,
+    VaultWriteRequest,
+)
 from app.tokenization.fingerprint import Fingerprinter, derive_fingerprint_key
 from app.tokenization.grammar import (
     CROCKFORD_ALPHABET,
@@ -94,35 +99,62 @@ class FakeVault:
         self.records: dict[tuple[UUID, UUID, str, str], str] = {}
         self.calls: list[VaultCall] = []
         self.written_values: list[str] = []
+        self.batch_sizes: list[int] = []
         self._token_override = token_override
 
-    async def get_or_create(
+    async def get_or_create_many(
         self,
         *,
         tenant_id: UUID,
         session_id: UUID,
-        entity_type: str,
-        normalized_hmac: str,
-        original_value: str,
+        entries: Sequence[VaultWriteRequest],
+        ttl_seconds: int,
+    ) -> tuple[str, ...]:
+        # One element per *call*, so a test can tell a batch of eight from
+        # eight batches of one -- which is the whole of ADR-0022.
+        self.batch_sizes.append(len(entries))
+        return tuple(
+            self._one(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                entry=entry,
+                ttl_seconds=ttl_seconds,
+            )
+            for entry in entries
+        )
+
+    def _one(
+        self,
+        *,
+        tenant_id: UUID,
+        session_id: UUID,
+        entry: VaultWriteRequest,
         ttl_seconds: int,
     ) -> str:
         self.calls.append(
             VaultCall(
-                entity_type=entity_type, normalized_hmac=normalized_hmac, ttl_seconds=ttl_seconds
+                entity_type=entry.entity_type,
+                normalized_hmac=entry.normalized_hmac,
+                ttl_seconds=ttl_seconds,
             )
         )
-        key = (tenant_id, session_id, entity_type, normalized_hmac)
+        key = (tenant_id, session_id, entry.entity_type, entry.normalized_hmac)
         existing = self.records.get(key)
         if existing is not None:
             return existing
         token = (
             self._token_override
             if self._token_override is not None
-            else format_token(entity_type, new_token_id())
+            else format_token(entry.entity_type, new_token_id())
         )
         self.records[key] = token
-        self.written_values.append(original_value)
+        self.written_values.append(entry.original_value)
         return token
+
+    @property
+    def round_trips(self) -> int:
+        """How many times the vault was actually called."""
+        return len(self.batch_sizes)
 
     @property
     def write_count(self) -> int:
@@ -692,6 +724,113 @@ async def test_identical_text_under_two_entity_types_gets_two_tokens() -> None:
     assert first.token != second.token
     assert first.normalized_hmac != second.normalized_hmac
     assert vault.write_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Tokenizer: batch vault interaction (ADR-0022)
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("count", [1, 2, 25])
+async def test_a_message_costs_one_vault_call_whatever_its_entity_count(count: int) -> None:
+    # Arrange -- distinct values, so none of them collapses onto another.
+    tokenizer, vault = build_tokenizer()
+    values = [f"user{index:03d}@example.com" for index in range(count)]
+    text = " ".join(values)
+    entities = []
+    cursor = 0
+    for value in values:
+        entities.append(entity("EMAIL_ADDRESS", cursor, cursor + len(value)))
+        cursor += len(value) + 1
+
+    # Act
+    result = await transform(tokenizer, text=text, entities=entities, policy=FakePolicy())
+
+    # Assert -- one round trip, `count` mappings. The per-entity implementation
+    # made `count` round trips, which is what ADR-0022 removed.
+    assert vault.round_trips == 1
+    assert vault.batch_sizes == [count]
+    assert len(result.mappings) == count
+
+
+async def test_repeats_are_collapsed_before_the_vault_is_called() -> None:
+    # Arrange -- the same address four times.
+    tokenizer, vault = build_tokenizer()
+    text = "a@x.com a@x.com a@x.com a@x.com"
+    entities = [entity("EMAIL_ADDRESS", index, index + 7) for index in (0, 8, 16, 24)]
+
+    # Act
+    result = await transform(tokenizer, text=text, entities=entities, policy=FakePolicy())
+
+    # Assert -- four spans, four mappings, one stored record, one call.
+    assert vault.round_trips == 1
+    assert vault.write_count == 1
+    assert len(result.mappings) == 4
+    assert len({mapping.token for mapping in result.mappings}) == 1
+
+
+async def test_actions_needing_no_mapping_never_reach_the_vault() -> None:
+    # Arrange
+    tokenizer, vault = build_tokenizer()
+    policy = FakePolicy(
+        actions={"PERSON": EntityAction.REDACT, "LOCATION": EntityAction.ALLOW},
+        default_action=EntityAction.TOKENIZE,
+    )
+    text = "Ada in Paris"
+    entities = [entity("PERSON", 0, 3), entity("LOCATION", 7, 12)]
+
+    # Act
+    await transform(tokenizer, text=text, entities=entities, policy=policy)
+
+    # Assert -- a redaction is deliberately irreversible and an allowed span is
+    # untouched, so neither is worth a round trip.
+    assert vault.round_trips == 0
+    assert vault.write_count == 0
+
+
+async def test_a_mixed_message_batches_only_the_spans_that_need_mappings() -> None:
+    # Arrange
+    tokenizer, vault = build_tokenizer()
+    policy = FakePolicy(
+        actions={"PERSON": EntityAction.REDACT},
+        default_action=EntityAction.TOKENIZE,
+    )
+    text = "Ada at a@x.com and b@x.com"
+    entities = [
+        entity("PERSON", 0, 3),
+        entity("EMAIL_ADDRESS", 7, 14),
+        entity("EMAIL_ADDRESS", 19, 26),
+    ]
+
+    # Act
+    await transform(tokenizer, text=text, entities=entities, policy=policy)
+
+    # Assert
+    assert vault.batch_sizes == [2]
+
+
+async def test_a_batch_of_the_wrong_size_is_an_internal_error() -> None:
+    # Arrange -- a vault that returns fewer tokens than it was asked for. The
+    # result is positional, so pairing spans with the wrong tokens would leak
+    # one value under another's token.
+    class ShortVault:
+        async def get_or_create_many(
+            self,
+            *,
+            tenant_id: UUID,
+            session_id: UUID,
+            entries: Sequence[VaultWriteRequest],
+            ttl_seconds: int,
+        ) -> tuple[str, ...]:
+            return (format_token("EMAIL_ADDRESS", new_token_id()),)
+
+    tokenizer = Tokenizer(vault=ShortVault(), fingerprinter=Fingerprinter(FINGERPRINT_KEY))
+    text = "a@x.com b@x.com"
+    entities = [entity("EMAIL_ADDRESS", 0, 7), entity("EMAIL_ADDRESS", 8, 15)]
+
+    # Act / Assert
+    with pytest.raises(GatewayError) as raised:
+        await transform(tokenizer, text=text, entities=entities, policy=FakePolicy())
+
+    assert raised.value.code is ErrorCode.INTERNAL_ERROR
 
 
 # ---------------------------------------------------------------------------

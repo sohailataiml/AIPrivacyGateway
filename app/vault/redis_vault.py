@@ -12,9 +12,21 @@ crafted fingerprint cannot inject ``:`` and escape its namespace; and the key
 name is not the fingerprint preimage even for someone who obtains the HMAC key.
 No key name contains an original value.
 
+A fingerprint key stores the bare 26-character *token id*, not the full token
+string. The entity type is already part of the fingerprint key's own name, so
+the token can be reassembled on read, and storing the id alone is what lets the
+batch script derive a record key from an index entry without parsing the token
+grammar inside Lua.
+
 ``meta`` is a set of every key belonging to the session. It exists so
 ``delete_session`` is an exact, tenant-scoped operation rather than a ``SCAN``
 across the keyspace.
+
+Writes are batched and atomic (ADR-0022): one ``EVALSHA`` per request, whatever
+the entity count. Lua is what makes that possible -- a ``WATCH``/``MULTI``
+transaction over N fingerprint keys would abort the entire batch whenever any
+one of them changed, so contention would grow with batch size rather than stay
+where it was per token.
 
 This vault requires a client with ``decode_responses=False``: envelopes are
 binary and would be corrupted by UTF-8 decoding.
@@ -24,7 +36,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final, cast
@@ -33,12 +45,13 @@ from uuid import UUID
 from redis.exceptions import RedisError
 
 from app.domain.errors import VaultEncryptionError, VaultUnavailableError
-from app.tokenization.grammar import format_token, parse_token
+from app.domain.models import VaultWriteRequest
+from app.tokenization.grammar import format_token, is_valid_token_id, parse_token
 from app.tokenization.ids import new_token_id
 from app.vault.crypto import EnvelopeCipher, VaultAad
 from app.vault.metrics import (
     OPERATION_DELETE_SESSION,
-    OPERATION_GET_OR_CREATE,
+    OPERATION_GET_OR_CREATE_MANY,
     OPERATION_RESOLVE_MANY,
     OUTCOME_ENCRYPTION_ERROR,
     OUTCOME_UNAVAILABLE,
@@ -53,7 +66,7 @@ from app.vault.tokens import validate_entity_type
 
 if TYPE_CHECKING:
     from redis.asyncio import Redis
-    from redis.asyncio.client import Pipeline
+    from redis.commands.core import AsyncScript
 
 logger = logging.getLogger("app.vault")
 
@@ -61,6 +74,75 @@ DEFAULT_KEY_PREFIX: Final = "sgw:v1"
 MIN_TTL_SECONDS: Final = 1
 MAX_TTL_SECONDS: Final = 7_200
 """Two hours -- the top of the configurable policy range."""
+
+MAX_BATCH_ENTRIES: Final = 10_000
+"""Mirrors ``MAX_POLICY_ENTITY_BUDGET``.
+
+The pipeline's entity budget already bounds a request long before this, so
+reaching this ceiling means a caller bypassed it. Refusing here keeps a single
+script invocation bounded regardless.
+"""
+
+_BATCH_WRITE_SCRIPT: Final = """
+-- Atomic batch get-or-create. Redis runs this to completion with nothing
+-- interleaved, so every entry gets the same create-or-reuse semantics the
+-- single-token version had, without a WATCH retry loop whose abort rate would
+-- climb with batch size.
+--
+-- KEYS[1]                meta set
+-- KEYS[2 .. 1+n]         fingerprint (index) keys
+-- KEYS[2+n .. 1+2n]      candidate record keys
+-- ARGV[1]                ttl seconds
+-- ARGV[2]                n
+-- ARGV[3]                record-key prefix, for rebuilding an existing key
+-- ARGV[4 .. 3+n]         candidate token ids
+-- ARGV[4+n .. 3+2n]      candidate envelopes (binary)
+--
+-- Returns a flat array of (token_id, created) pairs, in entry order.
+local meta_key = KEYS[1]
+local ttl = tonumber(ARGV[1])
+local n = tonumber(ARGV[2])
+local record_prefix = ARGV[3]
+local result = {}
+
+for i = 1, n do
+  local fingerprint_key = KEYS[1 + i]
+  local candidate_key = KEYS[1 + n + i]
+  local candidate_id = ARGV[3 + i]
+  local envelope = ARGV[3 + n + i]
+  local reused = false
+
+  local existing_id = redis.call('GET', fingerprint_key)
+  if existing_id then
+    local existing_key = record_prefix .. existing_id
+    if redis.call('EXISTS', existing_key) == 1 then
+      -- Reuse extends the record's life, so a value repeated late in a
+      -- session does not expire mid-conversation.
+      redis.call('EXPIRE', fingerprint_key, ttl)
+      redis.call('EXPIRE', existing_key, ttl)
+      result[#result + 1] = existing_id
+      result[#result + 1] = 0
+      reused = true
+    end
+    -- An index entry whose record is gone falls through and is replaced,
+    -- rather than handing back a token that cannot resolve.
+  end
+
+  if not reused then
+    redis.call('SET', candidate_key, envelope, 'EX', ttl)
+    redis.call('SET', fingerprint_key, candidate_id, 'EX', ttl)
+    -- One member per call: `unpack` is absent from some Lua versions and this
+    -- costs nothing across the network, being inside the same invocation.
+    redis.call('SADD', meta_key, candidate_key)
+    redis.call('SADD', meta_key, fingerprint_key)
+    result[#result + 1] = candidate_id
+    result[#result + 1] = 1
+  end
+end
+
+redis.call('EXPIRE', meta_key, ttl)
+return result
+"""
 
 # A key-name segment, not a credential; S105 fires on the constant's name.
 _TOKEN_SEGMENT: Final = ":token:"  # noqa: S105
@@ -111,7 +193,7 @@ def _as_binary(value: object) -> bytes:
 class RedisTokenVault:
     """``TokenVault`` backed by Redis with AES-256-GCM envelope encryption."""
 
-    __slots__ = ("_cipher", "_prefix", "_redis")
+    __slots__ = ("_batch_write", "_cipher", "_prefix", "_redis")
 
     def __init__(
         self,
@@ -123,6 +205,9 @@ class RedisTokenVault:
         self._redis = redis
         self._cipher = cipher
         self._prefix = key_prefix
+        # Registered once. redis-py sends EVALSHA and falls back to EVAL on
+        # NOSCRIPT, so a restarted or flushed Redis recovers by itself.
+        self._batch_write: AsyncScript = redis.register_script(_BATCH_WRITE_SCRIPT)
 
     # -- Key construction -------------------------------------------------
     def _session_prefix(self, tenant_id: UUID, session_id: UUID) -> str:
@@ -142,75 +227,113 @@ class RedisTokenVault:
         return f"{session_prefix}:meta"
 
     # -- TokenVault -------------------------------------------------------
-    async def get_or_create(
+    async def get_or_create_many(
         self,
         *,
         tenant_id: UUID,
         session_id: UUID,
-        entity_type: str,
-        normalized_hmac: str,
-        original_value: str,
+        entries: Sequence[VaultWriteRequest],
         ttl_seconds: int,
-    ) -> str:
-        validate_entity_type(entity_type)
+    ) -> tuple[str, ...]:
         ttl = _validated_ttl(ttl_seconds)
-        if not normalized_hmac:
-            raise ValueError("normalized_hmac must not be empty")
+        for entry in entries:
+            validate_entity_type(entry.entity_type)
+            if not entry.normalized_hmac:
+                raise ValueError("normalized_hmac must not be empty")
+        if len(entries) > MAX_BATCH_ENTRIES:
+            raise ValueError(f"batch of {len(entries)} exceeds the {MAX_BATCH_ENTRIES} ceiling")
+        if not entries:
+            return ()
 
-        with observe(OPERATION_GET_OR_CREATE, outcomes=_METRIC_OUTCOMES):
+        # Repeats collapse before the vault is touched, so a value appearing
+        # twenty times in one message costs one entry, not twenty.
+        unique, positions = _deduplicate(entries)
+
+        with observe(OPERATION_GET_OR_CREATE_MANY, outcomes=_METRIC_OUTCOMES):
             session_prefix = self._session_prefix(tenant_id, session_id)
-            fingerprint_key = self._fingerprint_key(session_prefix, entity_type, normalized_hmac)
             meta_key = self._meta_key(session_prefix)
 
-            # Seal before opening the transaction: a WATCH retry must not
-            # re-encrypt, and an encryption failure must not leave a half-open
-            # transaction behind.
-            candidate_id = new_token_id()
-            candidate_token = format_token(entity_type, candidate_id)
-            candidate_key = self._token_key(session_prefix, candidate_id)
-            envelope = self._seal(
-                tenant_id=tenant_id,
-                session_id=session_id,
-                entity_type=entity_type,
-                token=candidate_token,
-                token_id=candidate_id,
-                original_value=original_value,
-                ttl_seconds=ttl,
-            )
-
-            async def apply(pipe: Pipeline) -> tuple[str, bool]:
-                existing = await pipe.get(fingerprint_key)
-                if existing is not None:
-                    reused = _as_text(existing)
-                    parsed = parse_token(reused)
-                    if parsed is not None:
-                        reused_key = self._token_key(session_prefix, parsed.token_id)
-                        if await pipe.exists(reused_key):
-                            # redis-py leaves multi() unannotated.
-                            pipe.multi()  # type: ignore[no-untyped-call]
-                            pipe.expire(fingerprint_key, ttl)
-                            pipe.expire(reused_key, ttl)
-                            pipe.expire(meta_key, ttl)
-                            return reused, False
-                    # Index entry is unparseable or its record is gone: fall
-                    # through and mint a replacement rather than hand back a
-                    # token that cannot resolve.
-
-                pipe.multi()  # type: ignore[no-untyped-call]
-                pipe.set(candidate_key, envelope, ex=ttl)
-                pipe.set(fingerprint_key, candidate_token, ex=ttl)
-                pipe.sadd(meta_key, candidate_key, fingerprint_key)
-                pipe.expire(meta_key, ttl)
-                return candidate_token, True
-
-            with _store_failures_fail_closed(OPERATION_GET_OR_CREATE):
-                token, created = cast(
-                    tuple[str, bool],
-                    await self._redis.transaction(apply, fingerprint_key, value_from_callable=True),
+            # Seal everything before the script runs. An encryption failure
+            # must fail the whole batch with nothing written, rather than
+            # abandoning a partly applied one.
+            fingerprint_keys: list[str] = []
+            candidate_keys: list[str] = []
+            candidate_ids: list[str] = []
+            envelopes: list[bytes] = []
+            for entry in unique:
+                candidate_id = new_token_id()
+                fingerprint_keys.append(
+                    self._fingerprint_key(session_prefix, entry.entity_type, entry.normalized_hmac)
+                )
+                candidate_keys.append(self._token_key(session_prefix, candidate_id))
+                candidate_ids.append(candidate_id)
+                envelopes.append(
+                    self._seal(
+                        tenant_id=tenant_id,
+                        session_id=session_id,
+                        entity_type=entry.entity_type,
+                        token=format_token(entry.entity_type, candidate_id),
+                        token_id=candidate_id,
+                        original_value=entry.original_value,
+                        ttl_seconds=ttl,
+                    )
                 )
 
-        record_outcome(result=RESULT_CREATED if created else RESULT_REUSED)
-        return token
+            with _store_failures_fail_closed(OPERATION_GET_OR_CREATE_MANY):
+                raw = cast(
+                    "list[object]",
+                    await self._batch_write(
+                        keys=[meta_key, *fingerprint_keys, *candidate_keys],
+                        args=[
+                            ttl,
+                            len(unique),
+                            f"{session_prefix}{_TOKEN_SEGMENT}",
+                            *candidate_ids,
+                            *envelopes,
+                        ],
+                    ),
+                )
+
+            tokens, created = self._read_batch_result(raw, unique)
+
+        record_outcome(result=RESULT_CREATED, count=created)
+        record_outcome(result=RESULT_REUSED, count=len(unique) - created)
+        return tuple(tokens[index] for index in positions)
+
+    @staticmethod
+    def _read_batch_result(
+        raw: Sequence[object],
+        unique: Sequence[VaultWriteRequest],
+    ) -> tuple[list[str], int]:
+        """Turn the script's flat ``id, created`` pairs into tokens.
+
+        A malformed reply means this module and its script disagree, which is
+        an internal fault. It fails closed rather than handing back a token
+        that may not resolve.
+        """
+        if len(raw) != 2 * len(unique):
+            logger.error(
+                "vault batch write returned an unexpected reply length",
+                extra={"vault_operation": OPERATION_GET_OR_CREATE_MANY},
+            )
+            raise VaultEncryptionError(log_context={"reason": "batch_reply_length_mismatch"})
+
+        tokens: list[str] = []
+        created = 0
+        for index, entry in enumerate(unique):
+            token_id = _as_text(raw[2 * index])
+            if not is_valid_token_id(token_id):
+                logger.error(
+                    "vault index entry is not a valid token id",
+                    extra={
+                        "vault_operation": OPERATION_GET_OR_CREATE_MANY,
+                        "entity_type": entry.entity_type,
+                    },
+                )
+                raise VaultEncryptionError(log_context={"reason": "malformed_index_entry"})
+            tokens.append(format_token(entry.entity_type, token_id))
+            created += int(cast("int", raw[2 * index + 1]))
+        return tokens, created
 
     async def resolve_many(
         self,
@@ -323,7 +446,7 @@ class RedisTokenVault:
             logger.error(
                 "vault record could not be sealed",
                 extra={
-                    "vault_operation": OPERATION_GET_OR_CREATE,
+                    "vault_operation": OPERATION_GET_OR_CREATE_MANY,
                     "entity_type": entity_type,
                 },
             )
@@ -356,6 +479,29 @@ class RedisTokenVault:
                 },
             )
             raise
+
+
+def _deduplicate(
+    entries: Sequence[VaultWriteRequest],
+) -> tuple[tuple[VaultWriteRequest, ...], tuple[int, ...]]:
+    """Collapse repeats, returning the unique entries and each entry's index.
+
+    Identity is ``(entity_type, normalized_hmac)`` -- the same pair that names
+    a fingerprint key, so two entries that would contend for one key become
+    one entry instead.
+    """
+    seen: dict[tuple[str, str], int] = {}
+    unique: list[VaultWriteRequest] = []
+    positions: list[int] = []
+    for entry in entries:
+        identity = (entry.entity_type, entry.normalized_hmac)
+        index = seen.get(identity)
+        if index is None:
+            index = len(unique)
+            seen[identity] = index
+            unique.append(entry)
+        positions.append(index)
+    return tuple(unique), tuple(positions)
 
 
 def _validated_ttl(ttl_seconds: int) -> int:

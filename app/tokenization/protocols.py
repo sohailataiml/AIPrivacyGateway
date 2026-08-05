@@ -10,10 +10,15 @@ just as well.
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 from app.domain.models import EntityAction
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from app.domain.models import VaultWriteRequest
 
 
 class PolicyLike(Protocol):
@@ -48,20 +53,22 @@ class PolicyLike(Protocol):
 class VaultLike(Protocol):
     """The session vault, from the tokenizer's point of view.
 
-    ``get_or_create`` is expected to be atomic: concurrent calls with the same
-    fingerprint must return the same token, which is what makes repeated values
-    collapse onto one token within a session.
+    ``get_or_create_many`` is expected to be atomic: concurrent calls with the
+    same fingerprint must return the same token, which is what makes repeated
+    values collapse onto one token within a session.
+
+    It is deliberately the only write method. The tokenizer must not be able to
+    reach for a single-token call and reintroduce the per-entity round trip
+    ADR-0022 removed.
     """
 
-    async def get_or_create(
+    async def get_or_create_many(
         self,
         *,
         tenant_id: UUID,
         session_id: UUID,
-        entity_type: str,
-        normalized_hmac: str,
-        original_value: str,
+        entries: Sequence[VaultWriteRequest],
         ttl_seconds: int,
-    ) -> str:
-        """Return the existing token for this fingerprint, or mint and store one."""
+    ) -> tuple[str, ...]:
+        """Return one token per entry, positionally aligned with ``entries``."""
         ...

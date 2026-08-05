@@ -19,7 +19,7 @@ from typing import Final
 
 from prometheus_client import Counter, Histogram
 
-OPERATION_GET_OR_CREATE: Final = "get_or_create"
+OPERATION_GET_OR_CREATE_MANY: Final = "get_or_create_many"
 OPERATION_RESOLVE_MANY: Final = "resolve_many"
 OPERATION_DELETE_SESSION: Final = "delete_session"
 

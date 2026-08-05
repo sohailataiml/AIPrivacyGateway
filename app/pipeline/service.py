@@ -20,7 +20,7 @@ Order is the security control this module exists to enforce, and it is fixed:
 
 Steps 5 and 6 are the load-bearing pair. ``ProtectedChatRequest`` is built from
 the tokenizer's output and nothing else, and the tokenizer returns only after
-``vault.get_or_create`` has stored every mapping, so "no code path calls the
+``vault.get_or_create_many`` has stored every mapping, so "no code path calls the
 provider before mappings are persisted" holds by construction rather than by
 review: there is no value of any local variable in this module that lets the
 provider call happen first.

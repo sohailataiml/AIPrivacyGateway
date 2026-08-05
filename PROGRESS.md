@@ -3,8 +3,12 @@
 Status of the Secure AI Gateway against the phase plan in
 [implementation.md](implementation.md).
 
-**As of 2026-08-04** — 26 commits · 96 modules under `app/` · **882 tests passing,
-7 skipped** · **97% coverage** (target 90%) · `mypy --strict` clean · ruff clean.
+**As of 2026-08-04** — 96 modules under `app/` · **929 tests passing, 13 skipped**
+· **97% coverage** (target 90%) · `mypy --strict` clean · ruff clean.
+
+The seven PRD-alignment ADRs (0020–0026) and six supporting documents are now
+in the repository, and the first of them to touch code — **ADR-0022, batch vault
+operations** — is implemented. See §8.
 
 Six routes are live: `/v1/chat`, `/v1/detect`, `/v1/sessions/{session_id}`,
 `/health/live`, `/health/ready`, `/metrics`.
@@ -216,6 +220,9 @@ curl -H "Authorization: Bearer $METRICS_TOKEN" localhost:8000/metrics
 
 ## 6. Next steps, in order
 
+0. **Run the batch-vault integration tests against real Redis.** Everything in
+   §7 passes on a Lua emulator. `TEST_REDIS_URL=redis://localhost:6379/15
+   pytest tests/integration/test_vault_redis.py -m integration`.
 1. **Work the §24 manual security checklist** against the live service. The
    stack now runs, so this is unblocked — and defects 8–11 suggest the checklist
    will find things the suite cannot.
@@ -234,7 +241,59 @@ curl -H "Authorization: Bearer $METRICS_TOKEN" localhost:8000/metrics
 
 ---
 
-## 7. Build method
+## 7. ADR-0022: batch vault operations
+
+The read path was always batched — `resolve_many` takes a set of tokens and
+returns their originals in one round trip. The **write** path was not: the
+tokenizer walked detected spans and awaited `get_or_create` once per span, so
+protecting a message cost one Redis round trip per entity. Fine for a sentence,
+arithmetically fatal for the 2,000-word document target in
+[docs/performance.md](docs/performance.md).
+
+What changed:
+
+- **`TokenVault` now exposes `get_or_create_many` and no single-token write.**
+  Removing the per-token method is the point — leaving it would leave the loop
+  one call site away from coming back. A test asserts neither implementation
+  has a `get_or_create` attribute.
+- **The Redis implementation is one Lua script.** `WATCH`/`MULTI` over N
+  fingerprint keys was the obvious alternative and is the wrong one: any single
+  key changing aborts the whole batch, so contention would *grow* with batch
+  size where per-token `WATCH` only ever aborted one token. Lua runs to
+  completion with nothing interleaved.
+- **The fingerprint index now stores a bare token id** rather than the full
+  token, so the script can derive a record key from an index entry without
+  parsing the token grammar in Lua. Session-scoped keys with a ≤2h TTL, so the
+  format change needs no migration.
+- **Duplicates collapse before the vault is touched.** A value repeated twenty
+  times in one message is one entry, not twenty.
+- **The tokenizer mints everything in one call, then splices.** Minting has no
+  ordering requirement between spans; only splicing does, and it still runs
+  right to left so offsets stay valid.
+
+Measured on fakeredis, so the numbers describe this code rather than a network:
+a 200-entity batch costs **0.83 ms per token** against the 5 ms target, and 200
+repeats of one value cost 1.3 ms total. The round-trip count is the assertion
+that holds on any hardware: **one, at every batch size from 1 to 200.**
+
+Two caveats worth carrying:
+
+- **`uv.lock` is stale.** `lupa` was added to the dev extras — fakeredis cannot
+  execute `EVAL`/`EVALSHA` without a Lua runtime, so without it the vault suite
+  fails at the first script call. `uv` is not on PATH on this machine, so the
+  lock was not regenerated; run `uv lock` where it is. CI uses
+  `uv sync --all-extras` without `--frozen` and the Dockerfile is `--no-dev`,
+  so neither is blocked meanwhile.
+- **The script has only been run against fakeredis**, which executes Lua through
+  `lupa` rather than Redis's own interpreter. `tests/integration/test_vault_redis.py`
+  covers `EVALSHA` caching, `NOSCRIPT` recovery, real atomicity across separate
+  clients, and binary-safe envelope arguments — and skips without
+  `TEST_REDIS_URL`. Given that four of eleven defects so far were only visible
+  from a running container, treat "passes on fakeredis" as unfinished.
+
+---
+
+## 8. Build method
 
 Built with parallel sub-agents over two waves, with a human-run integration pass
 between them:
