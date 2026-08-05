@@ -124,8 +124,15 @@ real Prometheus configuration over inlining the token.
 
 ## 4. Recommended alerts
 
-Thresholds below are starting points for a single instance. Tune them against
-measured behaviour before trusting them to page anyone.
+**This section owns runtime alerting only.** Benchmark targets — what the build
+must demonstrate on demand — belong to [performance.md](performance.md) and are
+not restated here. An alert threshold is a judgement about live traffic; a
+target is a property of the system. Where an alert below is a latency number, it
+should be derived from the measurements `performance.md` produces.
+
+Thresholds below are starting points for a single instance, and none of them has
+been measured — `performance.md` §4 records that the benchmark suite has not been
+run. Tune them against observed behaviour before trusting them to page anyone.
 
 ### Page
 
