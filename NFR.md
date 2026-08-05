@@ -36,6 +36,10 @@ A requirement with no status label is a requirement nobody has checked.
 | S-8 | Production startup refuses placeholder or missing secrets | **Enforced** | `tests/unit/test_contracts.py` |
 | S-9 | Keys are rotatable without re-encrypting existing data | **Implemented** | key id travels with each record |
 | S-10 | Key rotation is driven by tooling and monitored | **Specified** | no rotation tooling exists |
+| S-11 | Parsers for attacker-supplied files run isolated from the gateway | **Enforced** | ADR-0028, `tests/security/test_document_extraction_isolation.py` |
+| S-12 | A parser that hangs, exhausts memory, or crashes cannot take the process with it | **Enforced** | one spawned process per document, terminated on timeout |
+| S-13 | Archive expansion is bounded before decompression | **Enforced** | DOCX ratio and entry-count guards read the ZIP directory |
+| S-14 | Third-party libraries that touch content have their log floor raised | **Enforced** | Presidio, the OpenAI SDK, and now pypdf/docx/lxml |
 
 ### Cryptographic requirements
 
@@ -64,6 +68,8 @@ A requirement with no status label is a requirement nobody has checked.
 | P-4 | Identical documents from different principals produce different ciphertext | **Enforced** | crypto isolation suite |
 | P-5 | Data classification is decided before a new data type is stored | **Implemented** | [docs/data-classification.md](docs/data-classification.md) |
 | P-6 | Retention is enforced automatically | **Specified** | documents persist until deleted |
+| P-7 | Extracted plaintext is never persisted, anywhere | **Enforced** | ADR-0030, `TestRetentionAndLogging` |
+| P-8 | An entity is never hidden by a segment boundary | **Enforced** | overlap + whitespace-aware cuts, property-tested |
 
 ---
 
@@ -81,7 +87,16 @@ Document-storage requirements that are structural rather than numeric:
 | PF-2 | Uploads and downloads stream; nothing lands on disk | **Enforced** |
 | PF-3 | Multipart is used past the part threshold, so a large upload never needs its length up front | **Enforced** — the MinIO suite asserts a multipart ETag |
 | PF-4 | Vault writes are batched, never one round trip per token | **Enforced** — ADR-0022 |
-| PF-5 | Upload throughput and document latency are measured | **Specified** — not measured |
+| PF-5 | Extraction concurrency is bounded, so a burst cannot start a process per request | **Enforced** — `EXTRACTION_MAX_WORKERS`, sampled during a parallel run |
+| PF-6 | Extraction has a wall-clock deadline that actually ends the work | **Enforced** — the worker is terminated, not abandoned |
+| PF-7 | Upload throughput, extraction time, and document latency are measured | **Specified** — not measured |
+
+**Extraction does not stream, and that is deliberate.** A PDF cross-reference
+table sits at the end of the file and points backwards, so a parser needs random
+access to the whole document. The bytes are buffered in `DocumentProcessor`
+under `MAX_DOCUMENT_BYTES`, and that buffer is a further reason the parse happens
+in another process. Storage itself streams end to end; this is the one stage
+that cannot.
 
 **Configured limits.** `MAX_DOCUMENT_BYTES` defaults to 25 MiB;
 `DOCUMENT_CHUNK_BYTES` defaults to 5 MiB, which is also S3's minimum part size.
@@ -101,7 +116,9 @@ Neither has been tuned against a measurement.
 | A-6 | An interrupted multipart upload is aborted, including on client disconnect | **Enforced** — asserted against a live MinIO by asking the server for open uploads |
 | A-7 | Deletes are idempotent | **Enforced** |
 | A-8 | Timeouts bound every outbound call | **Enforced** — a silent endpoint fails within the read timeout, not eventually |
-| A-9 | Behaviour under concurrency is measured | **Specified** — the system has never been load tested |
+| A-9 | An extraction worker is reaped on every exit path, including timeout | **Enforced** — asserted against `multiprocessing.active_children()` |
+| A-10 | A file that stored cleanly may still be refused at extraction, without destroying it | **Enforced** — `TestRefusals` |
+| A-11 | Behaviour under concurrency is measured | **Specified** — the system has never been load tested |
 
 ---
 
@@ -161,14 +178,28 @@ requirements is marketing.
 1. **Nothing has been benchmarked.** Every number in
    [docs/performance.md](docs/performance.md) is a target, not a measurement,
    and the alert thresholds derived from them are provisional.
-2. **The system has never run under concurrency.** A-9 is unverified.
+2. **The system has never run under concurrency.** A-11 is unverified.
 3. **No retention enforcement.** Documents persist until something deletes them.
 4. **No key rotation tooling.** The format supports it; nothing drives it.
 5. **`user` means "API key id".** There is no user model, so per-user scoping is
    per-credential scoping. It is a real boundary, but not the one the word
    implies.
-6. **Document processing stops at storage.** No extraction, segmentation,
-   detection, tokenization, or restoration for documents.
+6. **Document processing stops at segmentation.** No detection, tokenization,
+   vault interaction, or restoration for documents. Nothing calls
+   `DocumentProcessor`: it is composed and closed by the composition root and
+   invoked by nothing until the phase that adds detection.
+7. **Extraction is header-and-structure deep, not semantic.** A PDF with a
+   well-formed object graph and meaningless content extracts successfully.
+   Deciding whether a document *means* anything is not extraction's job.
+8. **A DOCX reports one page.** Pagination is a rendering decision the reader
+   makes and is not stored in the file. Page-accurate DOCX references would
+   require laying the document out.
+9. **No OCR.** A scanned PDF with no text layer is refused with
+   `no_extractable_text` rather than being read as images.
+10. **The segment overlap is the guarantee, and it is finite.** An entity longer
+    than `SEGMENT_OVERLAP_CHARACTERS` can still be split across a boundary and
+    seen only as fragments. The default is sized against the longest value a
+    recognizer needs whole, which is a judgement, not a measurement.
 
 ## Related documents
 

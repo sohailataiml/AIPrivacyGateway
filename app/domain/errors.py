@@ -48,6 +48,8 @@ class ErrorCode(StrEnum):
     DOCUMENT_INVALID = "DOCUMENT_INVALID"
     DOCUMENT_STORAGE_UNAVAILABLE = "DOCUMENT_STORAGE_UNAVAILABLE"
     DOCUMENT_ENCRYPTION_FAILED = "DOCUMENT_ENCRYPTION_FAILED"
+    DOCUMENT_EXTRACTION_FAILED = "DOCUMENT_EXTRACTION_FAILED"
+    DOCUMENT_EXTRACTION_TIMEOUT = "DOCUMENT_EXTRACTION_TIMEOUT"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
@@ -159,6 +161,17 @@ ERROR_CATALOG: Final[dict[ErrorCode, tuple[HTTPStatus, str]]] = {
     ErrorCode.DOCUMENT_ENCRYPTION_FAILED: (
         HTTPStatus.SERVICE_UNAVAILABLE,
         "The document storage service could not complete the operation.",
+    ),
+    ErrorCode.DOCUMENT_EXTRACTION_FAILED: (
+        # 422 rather than 500: the request was well formed and the file was
+        # not. Saying so does not disclose anything about the file, because the
+        # reason code never leaves the log.
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+        "The document could not be read.",
+    ),
+    ErrorCode.DOCUMENT_EXTRACTION_TIMEOUT: (
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        "The document could not be read in the time allowed.",
     ),
     ErrorCode.INTERNAL_ERROR: (
         HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -274,6 +287,30 @@ class DocumentStorageUnavailableError(GatewayError):
 
 class DocumentEncryptionError(GatewayError):
     code = ErrorCode.DOCUMENT_ENCRYPTION_FAILED
+
+
+class DocumentExtractionError(GatewayError):
+    """The document could not be parsed into text.
+
+    Covers a corrupt file, an encrypted PDF, a decompression bomb, and a
+    document whose extracted text exceeds the configured ceiling. They share a
+    code deliberately: the distinction matters to an operator reading the
+    reason in a log, and telling a caller which one it was describes the file
+    back to whoever supplied it.
+    """
+
+    code = ErrorCode.DOCUMENT_EXTRACTION_FAILED
+
+
+class DocumentExtractionTimeoutError(GatewayError):
+    """Extraction exceeded its wall-clock budget and the worker was killed.
+
+    Separate from ``DocumentExtractionError`` because the remedies differ: a
+    parse failure is about the file, a timeout is about capacity or a parser
+    that does not terminate.
+    """
+
+    code = ErrorCode.DOCUMENT_EXTRACTION_TIMEOUT
 
 
 class ProviderNotAllowedError(GatewayError):

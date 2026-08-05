@@ -73,15 +73,29 @@ These extend the rule above to five further areas: **document storage and
 extraction**, **vault interaction shape**, **session lifecycle**, **restoration
 behavior**, and **local infrastructure choices**.
 
+## Document Extraction ADRs
+
+| ADR | Decision | Status |
+|---|---|---|
+| [0028](0028-spawned-process-extraction-isolation.md) | Spawned process isolation for document extraction | Accepted |
+| [0029](0029-page-range-document-offsets.md) | One text buffer with page-range offsets | Accepted |
+| [0030](0030-do-not-persist-extracted-text.md) | Do not persist extracted plaintext | Accepted |
+
+These extend the rule to three more areas: **where untrusted parsing runs**,
+**how offsets are represented**, and **what may be written down**.
+
 ### ADRs with an "As Built" section
 
-Most ADRs here record a decision that has not yet been implemented. Two record
-one that has, and carry an **As Built** section describing the shipped
-reality — the wire format, the derivation, the AAD fields, and explicitly what
-the phase did *not* build:
+Most ADRs here record a decision that has not yet been implemented. Five record
+decisions that have been, and carry an **As Built** section describing the
+shipped reality — the wire format, the derivation, the AAD fields, the isolation
+mechanism — and explicitly what the phase did *not* build:
 
 - [0020](0020-encrypted-document-storage.md) — encrypted document storage
 - [0021](0021-user-scoped-document-keys.md) — user-scoped document keys
+- [0028](0028-spawned-process-extraction-isolation.md) — extraction isolation
+- [0029](0029-page-range-document-offsets.md) — document offsets
+- [0030](0030-do-not-persist-extracted-text.md) — extracted-text retention
 
 Where an ADR has an As Built section, that section is the one to check code
 against. The Decision above it says what was agreed; the As Built section says

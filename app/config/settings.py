@@ -130,6 +130,60 @@ class Settings(BaseSettings):
     second part rather than on a boundary anyone would notice in testing.
     """
 
+    # -- Document extraction and segmentation (ADR-0028, ADR-0029, ADR-0030) --
+    extraction_max_workers: int = Field(default=2, ge=1, le=32)
+    """Documents extracted at once. Each gets its own process.
+
+    Bounded because unbounded extraction is a denial-of-service vector: a
+    handful of large uploads would start a process each and starve the request
+    path. Two is deliberately conservative -- parsing is CPU-bound, so this
+    should track available cores rather than expected traffic.
+    """
+
+    extraction_timeout_seconds: float = Field(default=30.0, gt=0, le=600.0)
+    """Wall-clock budget for one extraction, after which the worker is killed.
+
+    A real deadline rather than a hope: the worker runs in its own process, so
+    the timeout ends it instead of merely abandoning it.
+    """
+
+    max_extracted_characters: int = Field(default=4_000_000, ge=1_024, le=100_000_000)
+    """Ceiling on extracted text. Roughly 1,500 pages of dense prose.
+
+    Enforced inside the worker while accumulating, so a file that expands
+    without bound is stopped part-way rather than after it has already been
+    allocated.
+    """
+
+    segment_max_characters: int = Field(default=12_000, ge=64, le=1_000_000)
+    """Largest segment handed to the detector.
+
+    Inside every current model's context window, and short enough that
+    detection accuracy does not degrade with length.
+    """
+
+    segment_overlap_characters: int = Field(default=256, ge=0, le=100_000)
+    """How much of the previous segment each segment repeats.
+
+    This is a **privacy** control, not a tuning knob. An entity shorter than the
+    overlap is guaranteed to appear whole in at least one segment; anything
+    longer can be split across a boundary and seen only in fragments, which no
+    recognizer matches. Lowering it trades detection coverage for throughput.
+    """
+
+    @model_validator(mode="after")
+    def _segments_must_be_able_to_advance(self) -> Self:
+        """An overlap at or above the segment size makes segmentation stall.
+
+        Caught here rather than at the first upload, because the failure would
+        otherwise be a hang in a request rather than a refusal at startup.
+        """
+        if self.segment_overlap_characters >= self.segment_max_characters:
+            raise ValueError(
+                "SEGMENT_OVERLAP_CHARACTERS must be smaller than SEGMENT_MAX_CHARACTERS"
+            )
+        return self
+
     # -- Provider ---------------------------------------------------------
     default_provider: str = "mock"
     """Local default is the mock provider so a fresh checkout cannot spend money."""

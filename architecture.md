@@ -733,10 +733,10 @@ Trace spans may contain component names, timing, and result codes. Prompt text a
 
 ## 9.11 Document Storage
 
-Extends the gateway from prompt text to files. **Storage is built; everything
-downstream of it is not** — there is no extraction, segmentation, detection,
-tokenization, or restoration for documents. The full specification, with the
-built/specified boundary marked at each step, is
+Extends the gateway from prompt text to files. **Storage, extraction, and
+segmentation are built; everything downstream of them is not** — there is no
+detection, tokenization, or restoration for documents. The full specification,
+with the built/specified boundary marked at each step, is
 [docs/document-processing.md](docs/document-processing.md).
 
 ### Responsibilities
@@ -801,6 +801,75 @@ the row `failed`; readiness reports `object_store: down` while liveness stays
 up. `DOCUMENTS_ENABLED=false` unmounts the routes entirely and removes the
 object-store configuration requirement, so a deployment that does not accept
 uploads is not made to configure a bucket.
+
+---
+
+## 9.12 Document Extraction and Segmentation
+
+Turns a stored document into ordered segments a detector can run over. **Nothing
+invokes it yet**: `DocumentProcessor` is assembled by the composition root and
+closed on shutdown, but no route reaches it and no other module calls it. It
+becomes reachable in the phase that adds detection over documents.
+
+### Structure
+
+| Module | Responsibility |
+|---|---|
+| `app/documents/extraction/models.py` | `ExtractedDocument` — one text buffer, pages as ranges |
+| `app/documents/extraction/extractors.py` | Pure, picklable per-type parsing plus its guards |
+| `app/documents/extraction/runner.py` | The `ExtractionRunner` seam and the subprocess isolation |
+| `app/documents/segmentation.py` | Boundary rules, overlap, and global offsets |
+| `app/documents/processing.py` | `DocumentProcessor` — open, decrypt, extract, segment |
+
+### Isolation (ADR-0028)
+
+One **spawned** subprocess per document, concurrency capped by an
+`asyncio.Semaphore`, and a wall-clock timeout that `terminate()`s the worker
+rather than abandoning it. Only bytes and safe reason codes cross the boundary;
+exceptions are never pickled back, because a traceback holds frames that hold
+the document. The child is reaped on every exit path.
+
+`spawn` rather than `fork` on every platform: a forked child would inherit the
+parent's memory — key rings, sockets, the audit queue — into the process whose
+whole job is running a parser over an attacker's file.
+
+### Types and guards
+
+TXT (strict UTF-8), PDF (pypdf, per-page text, encrypted files refused), and
+DOCX (python-docx, paragraphs and table cells, one page because a DOCX stores no
+pagination). A DOCX is a ZIP, so its expansion ratio and member count are checked
+against the central directory *before* anything is decompressed. The extracted
+character count is bounded inside the worker while accumulating.
+
+`pypdf`, `docx`, and `lxml` have their logger floors raised to `INFO`, applied
+inside the child as well as the parent.
+
+### Offsets (ADR-0029)
+
+One canonical text buffer; pages and segments are ranges into it with global
+offsets, derived by slicing rather than copied. Pages must be ordered,
+non-overlapping, contiguous, and cover the buffer exactly — a gap or an overlap
+is refused at construction, so offset drift is unrepresentable.
+
+### Segmentation
+
+Whitespace-aware boundaries plus overlap. The overlap is a privacy control: an
+entity shorter than it is guaranteed to appear whole in at least one segment,
+and a boundary falling mid-value is a fail-open condition. Duplicate detections
+across overlapping segments collapse on their global offsets.
+
+### Retention (ADR-0030)
+
+Extracted text is never persisted — no table, no object, no temporary file. It
+exists for the life of one call. Because nothing is stored, no `DocumentStatus`
+member was added and no migration was written.
+
+### Failure behaviour
+
+Fail closed. A file that Phase 1 stored can still be refused here, with
+`DOCUMENT_EXTRACTION_FAILED` (422) for an unparseable file or
+`DOCUMENT_EXTRACTION_TIMEOUT` (503) for one that overran its budget. Extraction
+failing does not destroy the caller's stored document.
 
 ---
 
@@ -1205,10 +1274,16 @@ secure-ai-gateway/
 │   ├── documents/
 │   │   ├── crypto.py
 │   │   ├── models.py
+│   │   ├── processing.py
 │   │   ├── protocol.py
 │   │   ├── repository.py
+│   │   ├── segmentation.py
 │   │   ├── service.py
 │   │   ├── validation.py
+│   │   ├── extraction/
+│   │   │   ├── extractors.py
+│   │   │   ├── models.py
+│   │   │   └── runner.py
 │   │   └── storage/
 │   │       ├── fakes.py
 │   │       └── s3.py

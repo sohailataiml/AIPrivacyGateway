@@ -2,22 +2,29 @@
 
 Extends the prompt pipeline to uploaded files.
 
-**Phase 1 — secure storage — is built.** Everything from `Extract` onward is
-still specification. This document marks the boundary explicitly at each step,
-because the most useful thing a design document can tell a reader is which half
-of it is true today.
+**Phase 1 (secure storage) and Phase 2 (extraction and segmentation) are built.**
+Everything from `Detect` onward is still specification for documents. This
+document marks the boundary explicitly at each step, because the most useful
+thing a design document can tell a reader is which half of it is true today.
 
 ## Pipeline
 
 ```text
-Upload → Validate → Encrypt and store │ Extract → Segment → Detect → Protect
-                                      │      → Batch vault write → Outbound scan
-        ─────── built ────────────────┤      → LLM → Restore → Audit
-                                      └────── specified ───────
+Upload → Validate → Encrypt and store → Extract → Segment │ Detect → Protect
+                                                          │ → Batch vault write
+        ─────────────────── built ─────────────────────── ┤ → Outbound scan
+                                                          │ → LLM → Restore
+                                                          └── specified ──────
 ```
 
 The stages after `Detect` are the existing prompt pipeline. What document
 processing adds is everything before it, plus segmentation.
+
+**Nothing calls extraction yet.** `DocumentProcessor` is assembled in the
+composition root and closed on shutdown, but no route reaches it and no other
+module invokes it. It becomes reachable in the phase that adds detection over
+documents. Phase 2 added **no routes, no migration, and no new
+`DocumentStatus` member**.
 
 ## Storage — built
 
@@ -71,18 +78,84 @@ No extraction, segmentation, detection, tokenization, restoration, or retention
 enforcement. A stored document is bytes the gateway can give back to exactly one
 principal, and nothing more.
 
-## Extraction — specified
+## Extraction — built
 
 CPU-bound extraction runs in a **bounded** worker pool. Unbounded extraction is
 a denial-of-service vector: a handful of large uploads would starve the request
 path.
 
-Temporary plaintext files are deleted immediately, including on the error path.
-Extracted text is Restricted data — see
-[data-classification.md](data-classification.md) — and the default is not to
-retain it.
+### Isolation (ADR-0028)
 
-## Offsets and references — specified
+Each document is parsed in **its own spawned subprocess**, not a thread. Threads
+would bound concurrency and nothing else: a Python thread cannot be killed, a
+runaway allocation is charged to the whole interpreter, and a segfault in a C
+extension such as `lxml` ends every in-flight request.
+
+| Mechanism | What it contains |
+|---|---|
+| One process per document | A crash or an OOM kill stops at the worker |
+| `asyncio.Semaphore` | Concurrency capped by `EXTRACTION_MAX_WORKERS` |
+| `poll(timeout)` then `terminate()`, then `kill()` | A parser that never finishes |
+| Reaping on every exit path | No orphan left holding a core |
+| `spawn`, never `fork` | The child inherits no key ring, socket, or pool |
+
+Only **bytes and safe reason codes** cross the boundary: the parent sends the
+document, the content type, and a character limit; the child returns page
+strings or a short reason. Exceptions are never pickled back, because a
+traceback holds frames and a frame holds the document.
+
+A `ProcessPoolExecutor` was rejected: its futures cannot be cancelled once
+running, so its timeout abandons the work rather than ending it — worse than no
+timeout, because it looks like one.
+
+### Supported types and their guards
+
+| Type | Library | Pages | Guards |
+|---|---|---|---|
+| TXT | stdlib | 1 | Strict UTF-8; no replacement characters |
+| PDF | pypdf (BSD-3) | one per page | Encrypted PDFs refused, not unlocked |
+| DOCX | python-docx (MIT) | 1 | ZIP expansion-ratio and entry-count limits |
+
+PyMuPDF is faster and AGPL, which this Apache-2.0 project cannot distribute.
+
+- **Strict UTF-8 for text.** Decoding with replacement would corrupt the very
+  characters detection is about to run over, and a mangled identifier is one no
+  recognizer matches — fail-open dressed as resilience.
+- **Encrypted PDFs are refused.** pypdf offers an empty-password unlock; taking
+  it would mean silently processing a document whose author restricted it.
+- **DOCX is a ZIP, so it is checked before it is decompressed.** Declared
+  uncompressed and compressed sizes come from the central directory, which
+  expands nothing. An archive over the ratio limit, or with more members than
+  any authored document has, is refused for the cost of a directory read.
+- **The character ceiling is enforced inside the child, while accumulating.**
+  Checking on return would mean the allocation the limit exists to prevent had
+  already happened.
+- **A DOCX reports one page**, because pagination is a rendering decision the
+  reader makes and is not stored in the file. Inventing page breaks would put
+  fabricated references into an audit trail.
+- **Table cells are extracted**, tab-separated. Forms put names and identifiers
+  in tables, and walking only paragraphs would be a detection gap disguised as
+  an extraction detail.
+
+### Parser logging
+
+`pypdf`, `docx`, and `lxml` have their logger floors raised to `INFO`, because
+pypdf quotes object contents in its structural warnings. This is the third
+recurrence of a leak class this project has already met twice — Presidio logging
+match context at DEBUG, and the OpenAI SDK logging request bodies. The floor is
+applied inside the child as well as the parent, since a spawned interpreter has
+none of the parent's logging configuration.
+
+### Retention (ADR-0030)
+
+Extracted text is Restricted data — see
+[data-classification.md](data-classification.md) — and **none of it is
+persisted**. No table, no object, and no temporary file: extraction works on an
+in-memory buffer, so there is no temporary plaintext to delete and no error path
+on which deletion can be forgotten. Because nothing is stored, there is nothing
+for a status to describe, which is why Phase 2 adds no `DocumentStatus` member.
+
+## Offsets and references — built
 
 Global offsets and page/segment references are preserved through extraction and
 segmentation. Two things depend on this:
@@ -92,10 +165,51 @@ segmentation. Two things depend on this:
 - **Correct restoration.** Restored output must reassemble in the original
   order.
 
+### One buffer, ranges into it (ADR-0029)
+
+An extracted document is **one canonical text buffer**. A page is a
+`(number, start, end)` range and owns no text; a segment is likewise a range,
+with **global** offsets. Page and segment text are derived by slicing, never
+stored, so a copy cannot drift from its offset — the divergence is
+unrepresentable rather than merely tested for.
+
+Pages are ordered, non-overlapping, contiguous, and cover the buffer exactly.
+A gap or an overlap is refused at construction, so an offset bug surfaces where
+the mistake is rather than where the wrong span eventually lands.
+
+`Segment.to_global(offset)` is the single place segment-local arithmetic is
+written, and each segment carries the page numbers it spans.
+
+### Segmentation — built
+
 Segmentation exists because documents exceed model context windows and because
 detection quality degrades on very long inputs. Segments must not split entities
 across boundaries in a way that hides them from the detector — a boundary
 falling mid-value is a fail-open condition.
+
+Two mechanisms answer that, and both are needed:
+
+- **Whitespace-aware boundaries.** A boundary is sought backwards from the size
+  limit for a paragraph break, then a line break, then a sentence end, then any
+  whitespace, within a window of 25% of the segment size. So a cut never lands
+  inside `marguerite.okonkwo@example.test` or `451-88-7396`, which contain no
+  whitespace. A run with no whitespace at all — an embedded base64 blob — is cut
+  at the hard limit, because it still has to be cut somewhere.
+- **Overlap.** Whitespace breaks are not sufficient alone, because many entities
+  *contain* whitespace: `Marguerite Okonkwo-Vasquez` splits cleanly at a space
+  into two fragments, neither of which is a person's name. Consecutive segments
+  repeat `SEGMENT_OVERLAP_CHARACTERS` of the previous one, so any entity shorter
+  than the overlap appears whole in at least one segment.
+
+Overlap means an entity can be detected twice at two segment offsets. That is
+deliberate and it is the safe direction: global offsets let duplicates collapse
+on identity later, whereas a missed entity is unrecoverable. **The overlap is
+the guarantee** — an entity longer than it can still be split, which is why the
+setting is a privacy control rather than a throughput knob.
+
+A document that extracts to zero characters — a scanned PDF with no text layer —
+is refused with `no_extractable_text` rather than yielding zero segments, which
+would look like success and send an empty prompt onward.
 
 ## Vault interaction — specified
 
@@ -144,10 +258,20 @@ TEST_OBJECT_STORE_ENDPOINT=http://localhost:9000 \
     pytest tests/integration/test_documents_minio.py -m integration
 ```
 
+## What Phase 2 does not do
+
+No detection, tokenization, vault interaction, provider call, restoration, or
+audit for documents. No route reaches extraction, no `DocumentStatus` member was
+added, and no migration was written. `DocumentProcessor` is composed and closed
+by the composition root and is invoked by nothing.
+
 ## Related decisions
 
 - ADR-0020 — encrypted object storage
 - ADR-0021 — user-scoped document keys
 - ADR-0022 — batch vault operations
 - ADR-0027 — MinIO as the local object store
+- ADR-0028 — spawned process isolation for extraction
+- ADR-0029 — page-range document offsets
+- ADR-0030 — do not persist extracted plaintext
 - ADR-0008 — fail closed

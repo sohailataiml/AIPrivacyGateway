@@ -34,7 +34,10 @@ from app.db.session import build_engine_from_settings, build_session_factory
 from app.detection.config import DetectionConfig
 from app.detection.engine import PresidioDetector
 from app.documents.crypto import DocumentCipher
+from app.documents.extraction.runner import SubprocessExtractionRunner
+from app.documents.processing import DocumentProcessor
 from app.documents.protocol import DocumentStore
+from app.documents.segmentation import Segmenter
 from app.documents.service import DocumentService
 from app.documents.storage.s3 import S3CompatibleDocumentStore
 from app.llm.registry import build_default_registry
@@ -71,6 +74,14 @@ class Services:
     rate_limiter: RedisRateLimiter
     documents: DocumentService | None
     """``None`` when ``DOCUMENTS_ENABLED`` is false and the routes are absent."""
+
+    document_processor: DocumentProcessor | None
+    """Extraction and segmentation. Present exactly when ``documents`` is.
+
+    Nothing calls it yet -- no route reaches extraction until the phase that
+    adds detection over documents. It is assembled here so its worker bound and
+    its shutdown are wired once, in the one place that knows how parts fit.
+    """
 
     def session_scope(self) -> AbstractAsyncContextManager[AsyncSession]:
         """Open one short-lived session."""
@@ -147,6 +158,10 @@ async def build_services(
         else None
     )
 
+    document_processor = (
+        _build_document_processor(settings, documents) if documents is not None else None
+    )
+
     return Services(
         settings=settings,
         engine=engine,
@@ -158,6 +173,7 @@ async def build_services(
         audit=audit,
         rate_limiter=RedisRateLimiter(redis=redis),
         documents=documents,
+        document_processor=document_processor,
     )
 
 
@@ -174,6 +190,28 @@ def _build_document_service(
             chunk_bytes=settings.document_chunk_bytes,
         ),
         session_scope=scope,
+        max_document_bytes=settings.max_document_bytes,
+    )
+
+
+def _build_document_processor(settings: Settings, documents: DocumentService) -> DocumentProcessor:
+    """Assemble extraction and segmentation over the storage service.
+
+    Reads through ``DocumentService`` rather than the store directly, so it
+    inherits the tenant and user scoping and the per-document decryption
+    instead of opening a second, laxer path to the same bytes.
+    """
+    return DocumentProcessor(
+        source=documents,
+        runner=SubprocessExtractionRunner(
+            max_workers=settings.extraction_max_workers,
+            timeout_seconds=settings.extraction_timeout_seconds,
+            max_characters=settings.max_extracted_characters,
+        ),
+        segmenter=Segmenter(
+            max_characters=settings.segment_max_characters,
+            overlap_characters=settings.segment_overlap_characters,
+        ),
         max_document_bytes=settings.max_document_bytes,
     )
 
@@ -198,6 +236,10 @@ async def stop_services(services: Services) -> None:
         ("audit", services.audit.stop),
         ("redis", services.redis.aclose),
     ]
+    if services.document_processor is not None:
+        # Before the storage service it reads through, so a worker cannot be
+        # mid-extraction against a store that has already been closed.
+        closers.append(("document_processor", services.document_processor.aclose))
     if services.documents is not None:
         closers.append(("documents", services.documents.aclose))
     closers.append(("engine", services.engine.dispose))

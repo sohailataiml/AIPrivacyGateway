@@ -7,9 +7,10 @@ Status of the Secure AI Gateway against the phase plan in
 (1,134 unit · 52 privacy · 58 security · 49 integration) · **96% coverage**
 (target 90%) · `mypy --strict` clean · ruff clean.
 
-The eight PRD-alignment ADRs (0020–0027) and seven supporting documents are in
-the repository. Two of them have shipped: **ADR-0022, batch vault operations**
-(§8) and **ADR-0020/0021, encrypted document storage** — Phase 15, storage only.
+Eleven ADRs (0020–0030) and eight supporting documents are in the repository.
+Four have shipped: **ADR-0022, batch vault operations** (§8),
+**ADR-0020/0021, encrypted document storage** (Phase 15), and
+**ADR-0028/0029/0030, document extraction and segmentation** (Phase 16).
 
 Ten routes are live: `/v1/chat`, `/v1/detect`, `/v1/sessions/{session_id}`,
 `/v1/documents` (POST), `/v1/documents/{id}` (GET, DELETE),
@@ -52,14 +53,15 @@ Where the two disagree, trust the test suite.
 | 13 | Observability | 5/7 | ⚠️ No OTel, no Grafana JSON |
 | 14 | Docker Compose and local ops | 11/11 | ✅ Executed end to end |
 | 15 | Secure document storage | 13/15 | ✅ Storage complete; no retention or rotation tooling |
-| 16 | Test strategy | mixed | ⚠️ See §4 |
-| 17 | Performance tests | 0/6 | ❌ Not started |
+| 16 | Document extraction and segmentation | 11/11 | ✅ Complete; composed but not yet invoked |
+| 17 | Test strategy | mixed | ⚠️ See §4 |
+| 18 | Performance tests | 0/6 | ❌ Not started |
 | 24 | Manual security verification | 0/16 | ❌ Not started |
 
-**14 of 17 backend phases are done.** The service answers requests, exports
-metrics, and stores documents encrypted end to end. What remains is measurement
-rather than construction: nothing has been benchmarked and the system has never
-run under concurrency.
+**15 of 18 backend phases are done.** The service answers requests, exports
+metrics, stores documents encrypted end to end, and turns a stored document into
+detector-ready segments. What remains is measurement rather than construction:
+nothing has been benchmarked and the system has never run under concurrency.
 
 ---
 
@@ -80,6 +82,7 @@ run under concurrency.
 | `app/api/`, `app/observability/` | 17 + 31 routers + 57 observability | Request id, error envelope, body-size limit, allowlist logging, composition root, four v1 routes, `/metrics` |
 | `app/llm/` | 17 | Registry, OpenAI adapter (Responses API, `store=False`), retries, mock provider |
 | `app/documents/` | 238 + 35 integration | Chunked AES-256-GCM with per-document HKDF keys, boundary validation, streaming multipart upload to S3-compatible storage, tenant- and user-scoped metadata, encrypted filenames |
+| `app/documents/extraction/`, `segmentation.py`, `processing.py` | 141 | TXT/PDF/DOCX extraction in a spawned, bounded, killable subprocess; zip-bomb and encrypted-PDF guards; one text buffer with page-range offsets; whitespace-aware segmentation with overlap; nothing persisted |
 | `tests/privacy/` | 52 | Canary regression suite, default-policy thresholds, and the document canary sweep over logs, SQL, metrics, responses, and object keys |
 | `tests/security/` | 58 | Document cryptographic isolation matrix (one test per AAD field) and authorization isolation at both the query and ciphertext layers |
 
@@ -117,6 +120,7 @@ form on first call and keeps it through any later reconfiguration, so
 `tests/conftest.py` also clears that cache — the cached `bind` only. Deleting
 `_logger` alongside it, as the first attempt did, sends structlog's proxy into
 infinite recursion on the next log call.
+| 19 | **A segment could be wholly contained in the one before it.** When the only break in the search window fell inside the previous segment, `_end_of_segment` returned an end that had already been covered. | No new characters, so no progress in the sense that matters. Coverage and ordering still held, which is why every hand-written example passed; on adversarial input — a break every few characters with an overlap near the segment size — it degenerates into a near-identical segment per character, and detection work multiplies with it. Found by Hypothesis at `text='0000000 00', max_characters=8, overlap=7`, on a run that explored examples an earlier run had not. The boundary search now rejects a candidate at or before the previous end and falls back to the hard limit, which is provably past it. |
 
 ### Lessons worth keeping
 
@@ -168,6 +172,11 @@ infinite recursion on the next log call.
   Alembic's generated `env.py` ships that default. It is a reasonable default
   for a standalone CLI and wrong for anything running in a live process — and
   nothing warns you, because a disabled logger fails silently by definition.
+- **Property-based tests earn their keep on the second run, not the first.**
+  Defect 19 passed a full green suite and then failed the next time Hypothesis
+  explored a different corner. The properties worth generating are the ones
+  whose failure mode is "still correct, just quietly much worse" — no exception,
+  no wrong answer, and no hand-written example that happens to hit it.
 - **A diagnostic that discards information costs more than it saves.**
   Defect 13 turned a five-minute fix into a longer one by reporting a present
   key as absent. Error codes are for the person holding the pager; collapsing
@@ -213,9 +222,24 @@ Read these before trusting a checkmark.
 - **`user` means "API key id".** There is no user model, so per-user document
   scoping is per-credential scoping. It is a real boundary — two keys in one
   tenant cannot read each other's documents — but not the one the word implies.
-- **Documents stop at storage.** No extraction, segmentation, detection,
-  tokenization, or restoration. `DocumentStatus` deliberately has no member the
-  system cannot reach.
+- **Documents stop at segmentation.** No detection, tokenization, vault
+  interaction, or restoration for documents. `DocumentStatus` deliberately has
+  no member the system cannot reach, which is why Phase 16 added none.
+- **`DocumentProcessor` is composed but never invoked.** The composition root
+  builds it and closes it on shutdown; no route reaches it and no other module
+  calls it. It becomes reachable in the phase that adds detection over
+  documents. Its coverage therefore comes entirely from its own suites.
+- **Extraction does not stream.** A PDF cross-reference table sits at the end of
+  the file and points backwards, so the parser needs the whole document. The
+  bytes are buffered under `MAX_DOCUMENT_BYTES`, which is one more reason the
+  parse happens in another process.
+- **A DOCX reports one page and there is no OCR.** Pagination is a rendering
+  decision that Word does not store, and a scanned PDF with no text layer is
+  refused rather than read as images.
+- **The segment overlap is a finite guarantee.** An entity longer than
+  `SEGMENT_OVERLAP_CHARACTERS` can still be split across a boundary. The default
+  is a judgement about the longest value a recognizer needs whole, not a
+  measurement.
 - **The privacy regression suite hand-rolls restoration**, because
   `app/restoration/` did not exist when it was written. It should be rewired to
   the real module.
