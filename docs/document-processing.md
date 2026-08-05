@@ -15,7 +15,9 @@ processing adds is everything before it, plus segmentation.
 
 ## Storage
 
-S3-compatible object storage, MinIO in the Compose and interview environment.
+S3-compatible object storage, MinIO in the Compose and interview environment
+(ADR-0027), reached through the S3 API only so the local store and a deployed
+one differ by configuration rather than by code.
 PostgreSQL stores metadata only — identifiers, content type, sizes, checksums,
 timestamps, processing status — and never document bytes or extracted text
 (ADR-0020).
@@ -68,4 +70,5 @@ transmitted.
 - ADR-0020 — encrypted object storage
 - ADR-0021 — user-scoped document keys
 - ADR-0022 — batch vault operations
+- ADR-0027 — MinIO as the local object store
 - ADR-0008 — fail closed

@@ -67,10 +67,11 @@ When a requested implementation conflicts with an accepted ADR, stop and create 
 | [0024](0024-outbound-payload-attestation.md) | Record outbound payload attestation | Accepted |
 | [0025](0025-pseudonymization-risk.md) | Treat pseudonymization as re-identifiable | Accepted |
 | [0026](0026-co-reference-safe-default.md) | Preserve indirect co-references | Accepted |
+| [0027](0027-use-minio-locally.md) | MinIO as the local S3-compatible object store | Accepted |
 
-These extend the rule above to four further areas: **document storage and
-extraction**, **vault interaction shape**, **session lifecycle**, and
-**restoration behavior**.
+These extend the rule above to five further areas: **document storage and
+extraction**, **vault interaction shape**, **session lifecycle**, **restoration
+behavior**, and **local infrastructure choices**.
 
 ## Supporting Documents
 

@@ -21,8 +21,8 @@ Both leave the storage operator able to read the object.
 ## Decision
 
 Store uploaded documents in S3-compatible object storage — MinIO in the
-Compose and interview environment — with **application-layer encryption**.
-PostgreSQL stores metadata only.
+Compose and interview environment, settled by ADR-0027 — with
+**application-layer encryption**. PostgreSQL stores metadata only.
 
 The gateway encrypts before the bytes leave the process and decrypts after they
 return. Storage-provider encryption, where present, is defence in depth and
