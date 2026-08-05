@@ -94,3 +94,33 @@ class SettingsKeyRing:
 
     def __repr__(self) -> str:
         return f"SettingsKeyRing(active_key_id={self.active_key_id!r})"
+
+
+class DocumentSettingsKeyRing:
+    """The document ring, read from ``DOCUMENT_KEY_<ID>`` settings.
+
+    Deliberately a separate ring from the vault's rather than a shared one.
+    Session mappings live for minutes and documents live for as long as policy
+    says, so the two rotate on different schedules -- and sharing a key would
+    make one rotation a decision about the other. Keys are never reused across
+    purposes here for the same reason they are never reused across tenants.
+    """
+
+    __slots__ = ("_settings",)
+
+    def __init__(self, settings: Settings) -> None:
+        self._settings = settings
+
+    @property
+    def active_key_id(self) -> str:
+        return self._settings.document_active_key_id.lower()
+
+    def key(self, key_id: str) -> bytes:
+        try:
+            raw = self._settings.document_key(key_id)
+        except ValueError:
+            raise VaultEncryptionError(log_context={"reason": "unknown_key_id"}) from None
+        return _validated(raw)
+
+    def __repr__(self) -> str:
+        return f"DocumentSettingsKeyRing(active_key_id={self.active_key_id!r})"

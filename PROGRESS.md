@@ -3,20 +3,29 @@
 Status of the Secure AI Gateway against the phase plan in
 [implementation.md](implementation.md).
 
-**As of 2026-08-04** — 96 modules under `app/` · **929 tests passing, 13 skipped**
-· **97% coverage** (target 90%) · `mypy --strict` clean · ruff clean.
+**As of 2026-08-05** — 107 modules under `app/` · **1,293 tests passing**
+(1,134 unit · 52 privacy · 58 security · 49 integration) · **96% coverage**
+(target 90%) · `mypy --strict` clean · ruff clean.
 
-The seven PRD-alignment ADRs (0020–0026) and six supporting documents are now
-in the repository, and the first of them to touch code — **ADR-0022, batch vault
-operations** — is implemented. See §8.
+The eight PRD-alignment ADRs (0020–0027) and seven supporting documents are in
+the repository. Two of them have shipped: **ADR-0022, batch vault operations**
+(§8) and **ADR-0020/0021, encrypted document storage** — Phase 15, storage only.
 
-Six routes are live: `/v1/chat`, `/v1/detect`, `/v1/sessions/{session_id}`,
-`/health/live`, `/health/ready`, `/metrics`.
+Ten routes are live: `/v1/chat`, `/v1/detect`, `/v1/sessions/{session_id}`,
+`/v1/documents` (POST), `/v1/documents/{id}` (GET, DELETE),
+`/v1/documents/{id}/status`, `/health/live`, `/health/ready`, `/metrics`.
 
-**The stack has now been run.** `docker compose up --build` from an empty
-volume, migrations applied, seeded, and real requests served end to end with
-Prometheus scraping. That run produced four defects the test suite could not
-see — see §3, defects 8–11.
+**The stack has been run twice.** The first run — `docker compose up --build`
+from an empty volume, migrations, seed, real requests, Prometheus scraping —
+produced four defects the suite could not see (§3, defects 8–11). The second
+pushed a document with canary PII through the whole storage path against real
+MinIO and PostgreSQL, and produced a fifth that made uploads impossible from a
+fresh stack (defect 12).
+
+**Every integration suite now runs against real infrastructure**, not only
+against fakes: PostgreSQL for migrations, Redis for the batch vault, MinIO for
+the object store. CI sets `REQUIRE_OBJECT_STORE_TESTS=1`, so a MinIO that fails
+to start is a red build rather than a green one full of skips.
 
 The per-phase checkboxes in `implementation.md` are kept in sync with this file.
 Where the two disagree, trust the test suite.
@@ -42,13 +51,15 @@ Where the two disagree, trust the test suite.
 | 12 | Audit logging | 6/8 | ⚠️ Correlation HMACs unpopulated; retention docs missing |
 | 13 | Observability | 5/7 | ⚠️ No OTel, no Grafana JSON |
 | 14 | Docker Compose and local ops | 11/11 | ✅ Executed end to end |
-| 15 | Test strategy | mixed | ⚠️ See §4 |
-| 16 | Performance tests | 0/6 | ❌ Not started |
-| 24 | Manual security verification | 0/16 | ❌ Blocked on running the stack |
+| 15 | Secure document storage | 13/15 | ✅ Storage complete; no retention or rotation tooling |
+| 16 | Test strategy | mixed | ⚠️ See §4 |
+| 17 | Performance tests | 0/6 | ❌ Not started |
+| 24 | Manual security verification | 0/16 | ❌ Not started |
 
-**13 of 16 backend phases are done.** The service now answers requests and
-exports metrics. What remains is verification against a running stack rather
-than construction: nobody has yet executed `docker compose up`.
+**14 of 17 backend phases are done.** The service answers requests, exports
+metrics, and stores documents encrypted end to end. What remains is measurement
+rather than construction: nothing has been benchmarked and the system has never
+run under concurrency.
 
 ---
 
@@ -68,7 +79,9 @@ than construction: nobody has yet executed `docker compose up`.
 | `app/domain/`, `app/config/` | 25 | Error catalog, domain contracts, settings with production hardening |
 | `app/api/`, `app/observability/` | 17 + 31 routers + 57 observability | Request id, error envelope, body-size limit, allowlist logging, composition root, four v1 routes, `/metrics` |
 | `app/llm/` | 17 | Registry, OpenAI adapter (Responses API, `store=False`), retries, mock provider |
-| `tests/privacy/` | 19 | Canary regression suite and default-policy threshold checks |
+| `app/documents/` | 238 + 35 integration | Chunked AES-256-GCM with per-document HKDF keys, boundary validation, streaming multipart upload to S3-compatible storage, tenant- and user-scoped metadata, encrypted filenames |
+| `tests/privacy/` | 52 | Canary regression suite, default-policy thresholds, and the document canary sweep over logs, SQL, metrics, responses, and object keys |
+| `tests/security/` | 58 | Document cryptographic isolation matrix (one test per AAD field) and authorization isolation at both the query and ciphertext layers |
 
 ---
 
@@ -90,6 +103,20 @@ were visible from inside the module that contained them.
 | 9 | **The runtime image shipped without the spaCy model.** The final `uv sync` is declarative and prunes anything absent from the lock file, deleting the model an earlier layer had installed. | The image built and started, then failed *every* request closed with `DetectorUnavailableError`. Fixed with `--inexact`. Invisible to the test suite; only running the container found it. |
 | 10 | **The container could not start at all.** The venv was built at `/build/.venv` and copied to `/app/.venv`, leaving every console script's shebang pointing at an interpreter the runtime image does not have. | `exec /app/.venv/bin/uvicorn: no such file or directory` — an error that names the script rather than the interpreter actually missing. The same mismatch also broke `spacy download`, because uv resolves its environment from the working directory. The builder now works in `/app`. |
 | 11 | **The Dockerfile ran two uvicorn workers.** | Four bounds are documented as per-process: the provider concurrency semaphore, the audit queue and its depth gauge, the `last_used_at` write bound, and the Prometheus registry. Two workers silently doubled three of them and split the fourth, so every metric rate was understated by whatever share of scrapes the other worker answered. Now one worker; scale with containers. |
+| 12 | **`docker-compose.yml` shipped a 34-byte document key.** `DOCUMENT_KEY_LOCAL1` decoded to `local-compose-document-key-32bytes` — the label says 32, the string is 34. | AES-256 needs exactly 32, so **every document upload against the composed stack failed with a 503**, and the storage phase was unusable from a fresh `docker compose up`. Nothing in the suite read that file. `tests/unit/test_contracts.py::TestShippedKeyMaterial` now decodes every ring key in `docker-compose.yml` and `.env.example` and asserts 32 bytes, and checks that each `*_ACTIVE_KEY_ID` names a key that exists. |
+| 13 | **A wrong-length key was reported as a missing one.** `DocumentCipher._derive` caught every exception from the key ring and flattened it to `reason=unknown_key_id`. | The ring already distinguishes `unknown_key_id` from `key_length_invalid`, and the flattening discarded exactly the information needed. Diagnosing defect 12 meant reading the log, concluding the key was absent, and finding it present — the reason code sent the investigation the wrong way. The ring's own reason now passes through. |
+| 14 | **The MinIO integration suite had never executed.** Its `store` fixture assigned `built.put = tracking_put` to record keys for cleanup; `S3CompatibleDocumentStore` defines `__slots__`, so every test in the file errored at setup. | The file read as thorough and verified nothing, which is worse than having no file: it made the storage adapter *look* covered. Coverage told the same story — `s3.py` sat at 34%. Rewritten to record keys where they are minted, and now at 93%. |
+| 15 | **Filename validation accepted bidirectional override characters.** `normalize_filename` rejected the `Cc` category and nothing else; `U+202E` and its relatives are `Cf`. | `report‮txt.pdf` renders as `report.fdp.txt`, so what a reviewer approves and what is stored are two different names. Rejected individually rather than by refusing all of `Cf`, because that category also holds the zero-width joiner and non-joiner, which are ordinary in Persian, Indic scripts, and emoji sequences. |
+| 16 | **The canary sweep was reading an empty log.** `configure_logging` calls `logging.basicConfig(..., force=True)` during lifespan startup, which removes every root handler — including pytest's `caplog`. | Every "no PII in logs" assertion in the new privacy suite passed against an empty string. Found only because the SQL sweep asserted it had found statements to search. The handler is now re-attached after startup, and each sweep asserts it found something before asserting it found nothing bad. |
+| 17 | **Running a migration disabled every application logger, permanently.** `migrations/env.py` calls `logging.config.fileConfig(alembic.ini)`, whose `disable_existing_loggers` argument defaults to `True`. Every logger not named in `alembic.ini` — that is, every `app.*` logger — gets `disabled = True`, and nothing ever re-enables it. | `tests/unit/test_vault.py::test_no_plaintext_mapping_appears_in_logs_when_encryption_fails` passed when its file ran alone and failed once the whole tree ran in one session, because by then the migration suite had run. **Worse than the failure is what it implies for the tests that pass:** every other "no sensitive value appears in the logs" assertion after that point was reading an empty list and passing for the wrong reason — defect 16 again, arriving from a different direction. Fixed at the source with `disable_existing_loggers=False`, which is also correct for any process that runs a migration alongside application code. Alembic ships this default in its generated template. |
+| 18 | **Starting the application permanently changed log filtering for the rest of the session.** [^17] `configure_logging` calls `structlog.configure` with `BoundLoggerFilteringAtInfo` and `cache_logger_on_first_use=True`, so every module logger caches a wrapper that drops `DEBUG` before it reaches the standard library. | Not the cause of defect 17, but the same hazard one layer up, and it makes every `caplog.set_level(DEBUG)` assertion vacuous once any test has started an app. Found while investigating 17. `tests/conftest.py` now snapshots and restores the logging configuration around every test, and clears the cached loggers so the restore actually takes effect. |
+
+[^17]: Restoring the configuration was not enough on its own.
+`cache_logger_on_first_use=True` means each module-level logger caches its bound
+form on first call and keeps it through any later reconfiguration, so
+`tests/conftest.py` also clears that cache — the cached `bind` only. Deleting
+`_logger` alongside it, as the first attempt did, sends structlog's proxy into
+infinite recursion on the next log call.
 
 ### Lessons worth keeping
 
@@ -110,11 +137,41 @@ were visible from inside the module that contained them.
   the authors never reviewed, that a real identifier was not one. Presidio's
   TLD list is reasonable for validation and wrong for a fail-closed control.
   Prefer matching on structure and letting policy decide.
-- **Four of eleven defects were only visible from a running container.**
-  Defects 8–11 all passed 882 tests, `mypy --strict`, and ruff. Two of them
-  (9 and 10) meant the service could not serve a single request; one (8) was a
-  silent leak. A green suite says the code is consistent with itself, not that
-  the artifact you ship works.
+- **Five of sixteen defects were only visible from a running container.**
+  Defects 8–11 and 12 all passed a green suite, `mypy --strict`, and ruff.
+  Three of them (9, 10, 12) meant the service could not perform its function at
+  all. A green suite says the code is consistent with itself, not that the
+  artifact you ship works.
+- **A file the test suite never reads is a file with no tests.** Defect 12 lived
+  in `docker-compose.yml`, which every deployment path uses and no test opened.
+  Shipped configuration is code; base64 that is *nearly* the right length is the
+  perfect defect, because it looks correct, parses cleanly, and fails only at
+  the moment of use.
+- **A test that has never run is worse than a missing test.** Defect 14 is the
+  clearest case: an integration file full of careful assertions, none of which
+  had ever executed, sitting next to a coverage number that said so plainly if
+  anyone had looked. The habit that catches this is asserting non-vacuity —
+  defect 16 was found *only* because a sweep checked it had something to search
+  before checking that nothing bad was in it.
+- **Run the whole tree in one session, not suite by suite.** Defects 17 and 18
+  are invisible to `pytest tests/unit` followed by `pytest tests/integration`:
+  each passes, and the contamination only shows when one session contains both.
+  The per-suite commands in the Makefile are convenient and are not the gate;
+  `make test-all` and the final CI step are.
+- **A passing privacy assertion is worth checking for a pulse.** Defect 17's
+  visible symptom was one failing test. Its real cost was every *other* "nothing
+  sensitive in the logs" test that ran after it and passed against an empty
+  list. An assertion that something is absent should first assert that it was
+  looking at something.
+- **Beware library defaults that reach outside their own scope.**
+  `logging.config.fileConfig` disables every logger it does not know about, and
+  Alembic's generated `env.py` ships that default. It is a reasonable default
+  for a standalone CLI and wrong for anything running in a live process — and
+  nothing warns you, because a disabled logger fails silently by definition.
+- **A diagnostic that discards information costs more than it saves.**
+  Defect 13 turned a five-minute fix into a longer one by reporting a present
+  key as absent. Error codes are for the person holding the pager; collapsing
+  distinct failures into one code to look tidy trades their time for nothing.
 - **A test that encodes a known gap should assert both directions.** The canary
   suite documented "the real detector cannot see this" — correct when written,
   and it failed loudly the moment the detector improved, which is what a good
@@ -127,27 +184,38 @@ were visible from inside the module that contained them.
 
 Read these before trusting a checkmark.
 
-- **Phase 2 migrations now run against real PostgreSQL**, applied inside the
-  stack (`alembic upgrade head` → `Running upgrade -> 0001`) against an empty
-  volume, producing all five tables. The 7 integration tests still skip here
-  for want of a host database; they run in CI.
-- **The stack has been run, but not exercised under load.** One cold start,
-  migrations, seed, and a handful of hand-driven requests — enough to prove the
-  path works, not enough to characterise it. Nothing here has seen concurrency.
-- **`test_outbound_payload_carries_tokens_and_no_originals` is timing-sensitive.**
-  It failed twice while a Docker build was saturating the CPU, raising
-  `ProviderTimeoutError` from the adapter's own deadline against a `respx` mock
-  that never touches the network, and passes consistently on an idle machine.
-  The test asserts a privacy property worth keeping, so the fix is to make the
-  adapter's deadline injectable for tests rather than to widen it globally —
-  not yet done. Treat a lone failure here as machine load until proven
-  otherwise.
-- **Phase 15 integration coverage is thin.** Only migrations. The plan calls for
-  full-flow, TTL expiry, concurrent token creation, session deletion, and
-  dependency-outage integration tests.
-- **Security assertions are spread through module tests** rather than collected
-  in the `tests/security/` tree the plan specifies. The coverage exists; the
-  organisation does not match §20.
+- **All three integration suites now run against real infrastructure.**
+  Migrations against PostgreSQL (`0001 → 0002`, both directions), the batch
+  vault against Redis, and the object store against MinIO — 49 tests, none
+  skipped. They are wired into CI, and the object store suite fails rather than
+  skips when `REQUIRE_OBJECT_STORE_TESTS=1`.
+- **The stack has been run, but not exercised under load.** Two cold starts,
+  migrations, seed, and hand-driven requests including a full document
+  round-trip — enough to prove the path works, not enough to characterise it.
+  Nothing here has seen concurrency.
+- **`test_outbound_payload_carries_tokens_and_no_originals` was
+  timing-sensitive** and now uses generous timeouts, because the OpenAI SDK
+  resolves platform details in a worker thread on its first request and that
+  landed outside a 4.5-second budget under `pytest --cov`. The proper fix is
+  still to make the adapter's deadline injectable rather than to widen it per
+  test. The same instrumentation slowness overran `asgi_lifespan`'s 5-second
+  startup default, so the API suites now pass an explicit 60-second bound.
+- **Integration coverage beyond storage is thin.** The plan calls for full-flow,
+  TTL expiry, concurrent token creation, session deletion, and dependency-outage
+  integration tests for the chat path; only the vault batch write is covered.
+- **`tests/security/` now exists** and holds the document cryptographic
+  isolation and authorization matrices. Security assertions for the chat path
+  are still spread through module tests rather than collected there.
+- **Document storage has no retention enforcement and no key rotation
+  tooling.** Documents persist until deleted. The wire format carries a key id
+  per object so rotation is possible without re-encrypting, but nothing drives
+  it. Both are listed as gaps in [NFR.md](NFR.md) §8.
+- **`user` means "API key id".** There is no user model, so per-user document
+  scoping is per-credential scoping. It is a real boundary — two keys in one
+  tenant cannot read each other's documents — but not the one the word implies.
+- **Documents stop at storage.** No extraction, segmentation, detection,
+  tokenization, or restoration. `DocumentStatus` deliberately has no member the
+  system cannot reach.
 - **The privacy regression suite hand-rolls restoration**, because
   `app/restoration/` did not exist when it was written. It should be rewired to
   the real module.
@@ -187,8 +255,16 @@ PYTHONPATH=. ./.venv/Scripts/python.exe scripts/demo_pipeline.py
 ./.venv/Scripts/python.exe -m mypy app
 ./.venv/Scripts/python.exe -m ruff check app tests scripts
 
-# What routes actually exist (currently: six)
+# What routes actually exist (currently: ten)
 ./.venv/Scripts/python.exe -c "from app.main import create_app; print(sorted(create_app().openapi()['paths']))"
+
+# The three integration suites, each against real infrastructure. None may skip.
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d postgres redis minio minio-init
+TEST_DATABASE_URL=postgresql+asyncpg://gateway:gateway@localhost:5432/gateway_test \
+TEST_REDIS_URL=redis://localhost:6379/15 \
+TEST_OBJECT_STORE_ENDPOINT=http://localhost:9000 \
+REQUIRE_OBJECT_STORE_TESTS=1 \
+  ./.venv/Scripts/python.exe -m pytest tests/integration -m integration -q
 
 # What a scrape returns, and that it carries nothing identifying
 ./.venv/Scripts/python.exe -m pytest tests/unit/test_observability.py -q
@@ -211,6 +287,17 @@ curl -X POST localhost:8000/v1/chat \
 
 # Metrics require the scrape token; Prometheus is at :9090.
 curl -H "Authorization: Bearer $METRICS_TOKEN" localhost:8000/metrics
+
+# Store a document, read it back, and confirm the bucket holds no plaintext.
+curl -X POST localhost:8000/v1/documents \
+  -H "Authorization: Bearer $KEY" \
+  -F "file=@report.pdf;type=application/pdf"
+curl localhost:8000/v1/documents/$ID -H "Authorization: Bearer $KEY" -o out.pdf
+
+docker compose exec minio mc alias set l http://127.0.0.1:9000 \
+  sgw-local-access-key sgw-local-secret-key-not-for-production
+docker compose exec minio mc ls --recursive l/sgw-documents   # opaque keys only
+docker compose exec minio mc cat l/sgw-documents/<key> | strings | head
 ```
 
 `make <target>` also works where GNU make is available; `python tasks.py

@@ -80,11 +80,55 @@ class Settings(BaseSettings):
 
     openai_api_key: SecretStr | None = None
 
+    document_active_key_id: str = "local1"
+    document_keys: dict[str, SecretStr] = Field(default_factory=dict)
+    """Document key ring, populated from ``DOCUMENT_KEY_<KEY_ID>`` variables.
+
+    Separate from the vault ring on purpose. The two protect data with different
+    lifetimes -- session mappings expire in minutes to hours, stored documents
+    persist -- so they rotate on different schedules, and a compromise of one
+    ring should not be a compromise of the other.
+    """
+
+    # -- Object storage (ADR-0020, ADR-0027) ------------------------------
+    documents_enabled: bool = True
+    """Whether the document routes are mounted and object storage is opened.
+
+    A deployment that does not accept uploads turns this off rather than
+    configuring a bucket it will never use -- and production then stops
+    demanding document keys it has no documents to protect.
+    """
+
+    object_store_endpoint_url: str | None = None
+    """MinIO or another S3-compatible endpoint. ``None`` means real AWS S3."""
+
+    object_store_region: str = "us-east-1"
+    object_store_bucket: str = "sgw-documents"
+    object_store_access_key_id: SecretStr | None = None
+    object_store_secret_access_key: SecretStr | None = None
+
+    object_store_use_path_style: bool = True
+    """MinIO addresses buckets by path; AWS S3 prefers virtual-host style."""
+
+    object_store_connect_timeout_seconds: float = Field(default=5.0, gt=0)
+    object_store_read_timeout_seconds: float = Field(default=30.0, gt=0)
+
     # -- Limits -----------------------------------------------------------
     default_session_ttl_seconds: int = Field(default=1800, ge=60, le=86_400)
     max_request_bytes: int = Field(default=262_144, ge=1_024)
     max_message_chars: int = Field(default=32_768, ge=1)
     max_entities_per_request: int = Field(default=500, ge=1, le=10_000)
+
+    max_document_bytes: int = Field(default=26_214_400, ge=1_024, le=1_073_741_824)
+    """25 MiB. The JSON limit above stays small; only the upload route gets this."""
+
+    document_chunk_bytes: int = Field(default=5_242_880, ge=5_242_880, le=67_108_864)
+    """Plaintext bytes sealed per chunk, and the multipart part size.
+
+    Floored at S3's 5 MiB minimum part size: every part except the last must
+    reach it, so a smaller value would make multipart uploads fail on the
+    second part rather than on a boundary anyone would notice in testing.
+    """
 
     # -- Provider ---------------------------------------------------------
     default_provider: str = "mock"
@@ -160,6 +204,20 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _load_document_key_ring(self) -> Self:
+        """Read ``DOCUMENT_KEY_<ID>`` variables into the document key ring."""
+        import os
+
+        if not self.document_keys:
+            discovered = {
+                name.removeprefix("DOCUMENT_KEY_").lower(): SecretStr(raw)
+                for name, raw in os.environ.items()
+                if name.startswith("DOCUMENT_KEY_") and raw
+            }
+            object.__setattr__(self, "document_keys", discovered)
+        return self
+
+    @model_validator(mode="after")
     def _enforce_production_hardening(self) -> Self:
         if self.app_env is not AppEnv.PRODUCTION:
             return self
@@ -198,6 +256,9 @@ class Settings(BaseSettings):
         if self.metrics_token is not None:
             problems.extend(self._metrics_token_problems(self.metrics_token))
 
+        if self.documents_enabled:
+            problems.extend(self._document_storage_problems())
+
         if problems:
             # Names of misconfigured variables only. No values.
             raise ValueError("invalid production configuration: " + "; ".join(problems))
@@ -212,6 +273,39 @@ class Settings(BaseSettings):
         if len(raw) < MIN_SECRET_CHARS:
             return [f"METRICS_TOKEN must be at least {MIN_SECRET_CHARS} characters"]
         return []
+
+    def _document_storage_problems(self) -> list[str]:
+        """Production refuses to accept uploads it cannot protect or store."""
+        problems: list[str] = []
+
+        active = self.document_keys.get(self.document_active_key_id.lower())
+        if active is None:
+            problems.append(
+                "no DOCUMENT_KEY_ entry matches "
+                f"DOCUMENT_ACTIVE_KEY_ID={self.document_active_key_id!r}"
+            )
+        else:
+            problems.extend(
+                problem.replace("vault key", "document key")
+                for problem in self._vault_key_problems(active)
+            )
+
+        if not self.object_store_bucket:
+            problems.append("OBJECT_STORE_BUCKET must be set when DOCUMENTS_ENABLED is true")
+        if self.object_store_access_key_id is None:
+            problems.append("OBJECT_STORE_ACCESS_KEY_ID must be set when DOCUMENTS_ENABLED is true")
+        if self.object_store_secret_access_key is None:
+            problems.append(
+                "OBJECT_STORE_SECRET_ACCESS_KEY must be set when DOCUMENTS_ENABLED is true"
+            )
+        for name, secret in (
+            ("OBJECT_STORE_ACCESS_KEY_ID", self.object_store_access_key_id),
+            ("OBJECT_STORE_SECRET_ACCESS_KEY", self.object_store_secret_access_key),
+        ):
+            if secret is not None and secret.get_secret_value() in DEVELOPMENT_PLACEHOLDERS:
+                problems.append(f"{name} is still a development placeholder")
+
+        return problems
 
     @staticmethod
     def _vault_key_problems(key: SecretStr) -> list[str]:
@@ -254,6 +348,13 @@ class Settings(BaseSettings):
         secret = self.vault_keys.get(key_id.lower())
         if secret is None:
             raise ValueError("the requested vault key id is not present in the key ring")
+        return base64.b64decode(secret.get_secret_value(), validate=True)
+
+    def document_key(self, key_id: str) -> bytes:
+        """Return a specific document key so documents sealed earlier still open."""
+        secret = self.document_keys.get(key_id.lower())
+        if secret is None:
+            raise ValueError("the requested document key id is not present in the key ring")
         return base64.b64decode(secret.get_secret_value(), validate=True)
 
 

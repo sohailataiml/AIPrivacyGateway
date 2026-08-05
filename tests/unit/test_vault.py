@@ -804,9 +804,7 @@ class TestBatchWrites:
         # Assert
         assert first == second
 
-    async def test_a_batch_mixes_reuse_and_creation_correctly(
-        self, vault: RedisTokenVault
-    ) -> None:
+    async def test_a_batch_mixes_reuse_and_creation_correctly(self, vault: RedisTokenVault) -> None:
         # Arrange -- one entry already stored, one brand new.
         known = write_request(1)
         (existing,) = await vault.get_or_create_many(
@@ -964,9 +962,9 @@ class TestBatchWrites:
 
         # Assert -- a fresh token that resolves, not the orphan.
         assert second != first
-        assert await vault.resolve_many(
-            tenant_id=TENANT, session_id=SESSION, tokens={second}
-        ) == {second: entry.original_value}
+        assert await vault.resolve_many(tenant_id=TENANT, session_id=SESSION, tokens={second}) == {
+            second: entry.original_value
+        }
 
     async def test_concurrent_overlapping_batches_agree_on_every_token(
         self, vault: RedisTokenVault, redis_client: Redis
@@ -1008,9 +1006,7 @@ class TestBatchWrites:
         # Assert
         assert set(here).isdisjoint(there)
         assert (
-            await vault.resolve_many(
-                tenant_id=TENANT, session_id=OTHER_SESSION, tokens=set(here)
-            )
+            await vault.resolve_many(tenant_id=TENANT, session_id=OTHER_SESSION, tokens=set(here))
             == {}
         )
 

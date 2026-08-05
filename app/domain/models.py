@@ -275,6 +275,9 @@ class Scope(StrEnum):
     CHAT_INVOKE = "chat:invoke"
     DETECT_INVOKE = "detect:invoke"
     SESSIONS_DELETE = "sessions:delete"
+    DOCUMENTS_WRITE = "documents:write"
+    DOCUMENTS_READ = "documents:read"
+    DOCUMENTS_DELETE = "documents:delete"
 
 
 @dataclass(frozen=True, slots=True)

@@ -36,6 +36,61 @@ each threat.
 | Denial of service | Rate limiting, bounded entity budgets, bounded batch sizes, fail-closed behaviour |
 | In transit | TLS |
 
+## Document storage threats
+
+Uploaded documents add a second high-value store. The shape of the problem is
+the vault's, one level deeper: a document belongs to a user, not merely to a
+tenant, and it is bulk Restricted content that has never been through detection.
+
+- **Bucket compromise** — object storage credentials, a volume copy, or a
+  misconfigured public bucket.
+- **Object relocation** — an attacker with bucket write access copies one
+  principal's object onto another's key.
+- **Cross-user read** — a document id from another user in the same tenant.
+- **Key enumeration** — guessing object keys to find documents.
+- **Chunk manipulation** — reordering, duplicating, dropping, or truncating
+  frames within a stored object to alter a document without breaking it.
+- **Type confusion** — an executable or archive stored under a `.pdf` or `.txt`
+  name, to be handed to a parser later.
+- **Filename spoofing** — bidirectional override characters that make a stored
+  name render as something other than what it is.
+- **Filename disclosure** — a name that identifies a person and a condition,
+  leaking through a log line, a metric label, or an error message.
+- **Resource exhaustion** — an upload with no `Content-Length`, or one that
+  simply never stops, consuming memory or storage.
+- **Orphaned multipart uploads** — abandoned parts that no listing shows and
+  that are billed until something removes them.
+- **Torn state** — a row that claims a document is stored when the object is not
+  there, or an object nothing points at.
+
+### Controls
+
+| Threat | Control |
+|---|---|
+| Bucket compromise | Application-layer AEAD (ADR-0020); the store holds ciphertext, is told nothing about the content type, and is private by default |
+| Object relocation, cross-user read | Per-document HKDF keys plus associated data binding tenant, user, and document (ADR-0021) — the copy authenticates as nobody's document. The scoped query is the first layer, the cryptography the second |
+| Key enumeration | Opaque random storage keys carrying no tenant, user, filename, or extension; a key is not a credential |
+| Chunk manipulation | Chunk index and a final-chunk flag inside each frame's AAD — reorder, duplicate, drop, and truncate all fail authentication |
+| Type confusion | Extension, declared MIME type, and magic bytes must agree; signature-less types are additionally checked against every other type's signature |
+| Filename spoofing | Bidirectional control characters rejected, and the name is rejected rather than repaired |
+| Filename disclosure | Stored encrypted, returned only to its owner, absent from the status route, and swept for by the canary suite across logs, SQL, metrics, and responses |
+| Resource exhaustion | Declared length checked up front and the real byte count checked as it streams; memory bounded by chunk size rather than document size |
+| Orphaned multipart uploads | Explicit abort on any failure including cancellation, verified against a live MinIO; a bucket lifecycle rule as backstop |
+| Torn state | Row before object, `stored` set last, object deleted before row |
+
+### What this does not defend against
+
+- **A legitimate user uploading a document they should not have.** Access
+  control is per principal; the gateway has no view of what a principal is
+  entitled to upload.
+- **Malicious document content.** Phase 1 checks headers, not structure. A
+  crafted PDF is stored as opaque bytes and handed back to its owner unchanged;
+  the exposure begins when extraction parses it, which is where a sandboxed,
+  bounded extraction path becomes load-bearing rather than merely planned.
+- **Traffic analysis.** Object sizes and upload timings are visible to anyone
+  with bucket access, and a ciphertext's length still approximates its
+  plaintext's.
+
 ## Residual risk
 
 **Gateway compromise is not defended against by these controls.** A compromised

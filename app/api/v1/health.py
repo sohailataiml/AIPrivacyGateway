@@ -75,6 +75,15 @@ async def ready(request: Request, response: Response) -> ReadinessResponse:
     )
 
     dependencies = {"redis": redis_status, "database": database_status}
+
+    documents = getattr(services, "documents", None)
+    if documents is not None:
+        # Only when uploads are enabled. Reporting a dependency the deployment
+        # does not use would make readiness fail for a capability nobody asked
+        # for -- and probing the bucket, rather than trusting configuration, is
+        # what keeps a readiness pass from being followed by failing uploads.
+        dependencies["object_store"] = await _probe("object_store", documents.health())
+
     healthy = all(value == STATUS_UP for value in dependencies.values())
     if not healthy:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE

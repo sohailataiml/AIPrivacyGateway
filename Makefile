@@ -44,8 +44,20 @@ test-privacy: ## Privacy regression suite
 test-security: ## Security control suite
 	$(RUN) pytest tests/security -m security
 
+# One session, not four. The per-suite targets above each start the application
+# and each pass in isolation; a defect where startup leaves global state behind
+# only shows when one process runs the whole tree. See PROGRESS.md defect 17.
+test-all: ## Every suite in a single session (the real gate)
+	$(RUN) pytest tests -m "not performance"
+
 coverage: ## Full suite with coverage gate
 	$(RUN) pytest tests/unit tests/privacy tests/security --cov=app --cov-report=term-missing --cov-report=xml
+
+# The object store adapter sits at 34% without this: the fake is a dictionary
+# and cannot exercise signing, multipart, or S3's part-size rules.
+coverage-full: ## Coverage including the integration suites (needs the stack up)
+	$(RUN) pytest tests/unit tests/privacy tests/security --cov=app --cov-report=
+	$(RUN) pytest tests/integration -m integration --cov=app --cov-append --cov-report=term-missing
 
 audit: ## Dependency and static security scan
 	$(RUN) bandit -q -r app

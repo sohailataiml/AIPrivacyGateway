@@ -875,6 +875,66 @@ inside the stack: the compose database publishes no host port, so the host-run
 
 ---
 
+## 20. Phase 15 — Secure Document Storage
+
+Storage only. Extraction, segmentation, detection, tokenization, and restoration
+for documents are **not** in this phase, and the code contains no partial
+version of them — no unused status member, no dead column, no stub that returns
+`NotImplemented`. See ADR-0020, ADR-0021, ADR-0027, and
+`docs/document-processing.md`.
+
+### Tasks
+
+- [x] Add `app/documents/` with a `DocumentStore` Protocol, an aioboto3
+      S3-compatible adapter, and an in-memory fake.
+- [x] Chunked AES-256-GCM with per-document HKDF-SHA256 data keys.
+- [x] Boundary validation: filename, type (extension + MIME + magic bytes),
+      and length (declared and streamed).
+- [x] Streaming upload and download, with S3 multipart past the part threshold
+      and explicit abort on failure or cancellation.
+- [x] Opaque storage keys; the object store is never told the real content type.
+- [x] Encrypted filename column; tenant- and user-scoped repository.
+- [x] Four routes under `/v1/documents`, with their own scopes.
+- [x] Alembic migration `0002_documents`, verified in both directions.
+- [x] MinIO and a bucket-initialization service in Docker Compose (ADR-0027).
+- [x] Settings, production hardening checks, and `.env.example` entries.
+- [x] Unit, security, privacy, and MinIO integration suites.
+- [x] CI runs the MinIO suite and fails if it would skip.
+- [ ] Retention enforcement. Documents persist until deleted.
+- [ ] Key rotation tooling. The format supports it; nothing drives it.
+
+### Deviations worth knowing
+
+- **Routes are `/v1/documents`, not `/documents`.** Every other route in the
+  gateway is versioned, and an unversioned sibling to `/v1/chat` reads as a bug.
+- **`user_id` is the API key id.** The gateway authenticates keys, not people.
+  Two keys in one tenant are two principals and cannot read each other's
+  documents. `app/api/v1/documents.py::_user_id` is the single place that
+  changes when a user model arrives.
+- **`DOCUMENTS_ENABLED` gates both the routes and the configuration
+  requirement**, so a deployment that does not accept uploads is not forced to
+  configure a bucket.
+
+### Acceptance criteria
+
+- A document round-trips through real MinIO, sealed, via multipart.
+- The stored object contains no plaintext, and the object key names nothing.
+- Another tenant, another user, and an unknown id all get the same answer.
+- A copy of one principal's object under another's key fails to authenticate.
+- No failure leaves a row claiming `stored` without an object.
+- An interrupted or cancelled multipart upload leaves no open upload behind.
+- No canary value reaches a log line, a SQL statement, a metric, a response, or
+  an object key.
+
+**Verified 2026-08-05.** All seven, against a live MinIO rather than the fake.
+Getting there found three more defects — an integration fixture that had never
+executed because it patched a `__slots__` class, filename validation that
+accepted bidirectional override characters, and a canary sweep that was reading
+an empty log because application startup removes pytest's capture handler. See
+PROGRESS.md.
+
+---
+
 
 ## 17. Phase 16 — Frontend Bootstrap
 

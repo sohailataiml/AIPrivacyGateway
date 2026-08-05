@@ -731,6 +731,79 @@ Trace spans may contain component names, timing, and result codes. Prompt text a
 
 ---
 
+## 9.11 Document Storage
+
+Extends the gateway from prompt text to files. **Storage is built; everything
+downstream of it is not** — there is no extraction, segmentation, detection,
+tokenization, or restoration for documents. The full specification, with the
+built/specified boundary marked at each step, is
+[docs/document-processing.md](docs/document-processing.md).
+
+### Responsibilities
+
+Accept an uploaded file, validate it at the boundary, seal it, put it in
+S3-compatible object storage, and give it back to exactly one principal. Store
+metadata in PostgreSQL and document bytes nowhere else.
+
+### Structure
+
+| Module | Responsibility |
+|---|---|
+| `app/documents/validation.py` | Pure boundary checks: filename, type, length |
+| `app/documents/crypto.py` | The wire format and the chunked cipher |
+| `app/documents/models.py` | Domain types and the accepted-type table |
+| `app/documents/protocol.py` | The `DocumentStore` seam |
+| `app/documents/storage/s3.py` | aioboto3 adapter — MinIO, S3, or any compatible endpoint |
+| `app/documents/storage/fakes.py` | In-memory store for tests in other packages |
+| `app/documents/repository.py` | Tenant- and user-scoped metadata access |
+| `app/documents/service.py` | Order of operations, and the consistency guarantee |
+| `app/api/v1/documents.py` | Four routes under `/v1` |
+
+Nothing above the `DocumentStore` protocol knows whether it is talking to MinIO
+or AWS. Nothing below it knows what a document is.
+
+### Encryption
+
+Per-document data keys derived with HKDF-SHA256, then AES-256-GCM applied
+**per chunk** rather than to the whole document — single-shot GCM would force a
+25 MiB file into memory to encrypt and again to verify. Associated data binds
+tenant, user, document, content type, schema version, purpose, chunk index, and
+a final-chunk flag. See ADR-0020 and ADR-0021 for the format and the reasoning.
+
+### Storage layout
+
+| Where | What |
+|---|---|
+| Object store | Ciphertext, under a random opaque key with a `documents/` prefix, written as `application/octet-stream` with no user metadata |
+| PostgreSQL | Identifiers, content type, byte size, SHA-256, status, timestamps, and the **encrypted** filename |
+| Anywhere else | Nothing |
+
+### Streaming and multipart
+
+Both directions stream. The adapter switches to S3 multipart past the part
+threshold and fills each part to the 5 MiB minimum, because S3 rejects any part
+but the last below it. Any failure — including a client disconnect arriving as
+task cancellation — aborts the upload explicitly, because abandoned parts do not
+appear in an object listing and are billed until a lifecycle rule finds them.
+
+### Consistency
+
+A document is a row and an object with no transaction spanning the two, so
+ordering carries the guarantee: validate, insert `receiving`, stream and seal
+and upload, then mark `stored`. Deletion runs object-first. The invariant is
+that a row never claims `stored` for an object that is not there, and no object
+survives with nothing pointing at it.
+
+### Failure behaviour
+
+Fail closed (ADR-0008). An unreachable object store fails the upload and marks
+the row `failed`; readiness reports `object_store: down` while liveness stays
+up. `DOCUMENTS_ENABLED=false` unmounts the routes entirely and removes the
+object-store configuration requirement, so a deployment that does not accept
+uploads is not made to configure a bucket.
+
+---
+
 ## 10. API Contract Summary
 
 ### `POST /v1/chat`
@@ -776,6 +849,33 @@ Response:
 ### `POST /v1/detect`
 
 Administrative or diagnostic endpoint. It returns spans, types, scores, and intended actions. It must require a dedicated scope. By default, it must not echo original values.
+
+### `POST /v1/documents`
+
+`multipart/form-data` upload of one TXT, PDF, or DOCX file, sealed and stored.
+Requires the `documents:write` scope. Returns the stored document's metadata and
+its filename; never a storage key. Exempt from the JSON body size limit and
+bounded instead by `MAX_DOCUMENT_BYTES`, checked both from the declared
+`Content-Length` and from the real byte count as it streams.
+
+### `GET /v1/documents/{document_id}`
+
+Streams the original bytes back to the principal that uploaded them. Requires
+`documents:read`. Sends `Cache-Control: no-store` and an RFC 5987–encoded
+`Content-Disposition`, because a filename may hold non-ASCII characters and a
+raw one in a header is a response-splitting risk.
+
+### `GET /v1/documents/{document_id}/status`
+
+Metadata only — `receiving`, `stored`, or `failed`. Touches no key and reads no
+object, so polling is cheap and never causes a decryption. Deliberately carries
+no filename.
+
+### `DELETE /v1/documents/{document_id}`
+
+Destroys the object and the row. Answers `204` whether or not the document
+existed, for the same reason session deletion does: a different answer for
+"never existed" would make this an oracle for which document ids are real.
 
 ### `DELETE /v1/sessions/{session_id}`
 
@@ -1075,27 +1175,43 @@ Use a typed settings class. Fail startup on invalid production configuration.
 secure-ai-gateway/
 ├── architecture.md
 ├── implementation.md
+├── NFR.md
+├── PROGRESS.md
 ├── README.md
 ├── pyproject.toml
 ├── uv.lock
 ├── .env.example
 ├── docker-compose.yml
+├── docker-compose.dev.yml
 ├── Dockerfile
 ├── alembic.ini
 ├── app/
 │   ├── main.py
 │   ├── api/
-│   │   ├── dependencies.py
+│   │   ├── composition.py
 │   │   ├── errors.py
+│   │   ├── middleware.py
 │   │   └── v1/
 │   │       ├── chat.py
 │   │       ├── detect.py
+│   │       ├── documents.py
 │   │       ├── health.py
 │   │       └── sessions.py
 │   ├── auth/
 │   ├── audit/
 │   ├── config/
+│   ├── db/
 │   ├── detection/
+│   ├── documents/
+│   │   ├── crypto.py
+│   │   ├── models.py
+│   │   ├── protocol.py
+│   │   ├── repository.py
+│   │   ├── service.py
+│   │   ├── validation.py
+│   │   └── storage/
+│   │       ├── fakes.py
+│   │       └── s3.py
 │   ├── domain/
 │   ├── llm/
 │   ├── observability/
@@ -1105,17 +1221,19 @@ secure-ai-gateway/
 │   ├── restoration/
 │   ├── tokenization/
 │   └── vault/
+├── docs/
+│   └── adr/
 ├── migrations/
 ├── scripts/
 ├── tests/
+│   ├── fixtures/
 │   ├── unit/
 │   ├── integration/
 │   ├── privacy/
 │   ├── security/
 │   └── performance/
 └── deploy/
-    ├── compose/
-    └── kubernetes/
+    └── compose/
 ```
 
 ---

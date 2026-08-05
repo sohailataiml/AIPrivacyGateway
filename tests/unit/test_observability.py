@@ -85,9 +85,7 @@ class TestHttpLabels:
             status="404",
         )
 
-        http_metrics.observe_request(
-            method="BREW", route=None, status=404, duration_seconds=0.01
-        )
+        http_metrics.observe_request(method="BREW", route=None, status=404, duration_seconds=0.01)
 
         assert (
             sample(
@@ -167,11 +165,9 @@ class TestStageMetrics:
         assert sample("sgw_pipeline_stage_duration_seconds_count", stage="tokenization") >= before
 
     def test_a_deadline_is_distinguished_from_a_fault(self) -> None:
-        """"The detector is down" and "we ran out of time" have different
+        """ "The detector is down" and "we ran out of time" have different
         remedies, so they must not share a series."""
-        before = sample(
-            "sgw_pipeline_stage_total", stage="provider", outcome="deadline_exceeded"
-        )
+        before = sample("sgw_pipeline_stage_total", stage="provider", outcome="deadline_exceeded")
 
         with (
             pytest.raises(GatewayError),
@@ -209,9 +205,7 @@ class TestRefusalMetrics:
             (ProviderNotAllowedError(), pipeline_metrics.REASON_PROVIDER_NOT_ALLOWED),
         ],
     )
-    def test_a_refusal_is_counted_under_its_reason(
-        self, error: GatewayError, reason: str
-    ) -> None:
+    def test_a_refusal_is_counted_under_its_reason(self, error: GatewayError, reason: str) -> None:
         before = sample("sgw_policy_blocks_total", reason=reason)
 
         pipeline_metrics.record_refusal(error)
@@ -277,8 +271,7 @@ class TestProviderMetrics:
             raise asyncio.CancelledError
 
         assert (
-            sample("sgw_provider_requests_total", provider="mock", result="cancelled")
-            == before + 1
+            sample("sgw_provider_requests_total", provider="mock", result="cancelled") == before + 1
         )
 
     def test_an_invented_result_is_refused(self) -> None:
@@ -325,9 +318,7 @@ class TestEntityMetrics:
         assert token_metrics.normalize_entity_type(entity_type) == token_metrics.ENTITY_TYPE_OTHER
 
     def test_a_plan_is_counted_by_type_and_action(self) -> None:
-        before = sample(
-            "sgw_entities_detected_total", entity_type=EMAIL_ADDRESS, action="tokenize"
-        )
+        before = sample("sgw_entities_detected_total", entity_type=EMAIL_ADDRESS, action="tokenize")
 
         token_metrics.record_plan(
             [
@@ -398,9 +389,7 @@ class TestMetricsMiddleware:
             assert (await probe.get(f"/items/{item_id}")).status_code == 200
 
         assert (
-            sample(
-                "sgw_http_requests_total", method="GET", route="/items/{item_id}", status="200"
-            )
+            sample("sgw_http_requests_total", method="GET", route="/items/{item_id}", status="200")
             == before + 3
         )
         assert sample("sgw_http_requests_total", method="GET", route="/items/a1", status="200") == 0
@@ -427,9 +416,7 @@ class TestMetricsMiddleware:
             == before + 1
         )
 
-    async def test_a_handler_exception_is_counted_as_a_500(
-        self, probe: httpx.AsyncClient
-    ) -> None:
+    async def test_a_handler_exception_is_counted_as_a_500(self, probe: httpx.AsyncClient) -> None:
         """The requests an operator most wants counted are the ones that blew
         up, and those never reach the ``return response`` path."""
         before = sample("sgw_http_requests_total", method="GET", route="/boom", status="500")
@@ -492,7 +479,7 @@ class TestMetricsEndpoint:
         assert response.json()["error"]["code"] == "AUTHENTICATION_FAILED"
 
     async def test_a_refusal_does_not_say_which_part_was_wrong(self) -> None:
-        """"No token" and "wrong token" answer identically, so the endpoint is
+        """ "No token" and "wrong token" answer identically, so the endpoint is
         not an oracle for whether a guess had the right shape."""
         client = await scrape_client(scrape_settings(metrics_token=METRICS_TOKEN))
         async with client:

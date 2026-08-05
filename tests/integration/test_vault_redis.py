@@ -88,9 +88,7 @@ def write_request(index: int) -> VaultWriteRequest:
 
 @requires_redis
 class TestBatchWriteAgainstRealRedis:
-    async def test_a_batch_round_trips_through_real_redis(
-        self, vault: RedisTokenVault
-    ) -> None:
+    async def test_a_batch_round_trips_through_real_redis(self, vault: RedisTokenVault) -> None:
         # Arrange
         session = uuid4()
         entries = tuple(write_request(index) for index in range(25))
@@ -195,10 +193,7 @@ class TestBatchWriteAgainstRealRedis:
         assert removed == 8
         assert await redis_client.keys(f"{prefix}:{TENANT}:{session}:*") == []
         assert (
-            await vault.resolve_many(
-                tenant_id=TENANT, session_id=session, tokens=set(tokens)
-            )
-            == {}
+            await vault.resolve_many(tenant_id=TENANT, session_id=session, tokens=set(tokens)) == {}
         )
 
     async def test_an_unreachable_redis_fails_closed(self, prefix: str) -> None:

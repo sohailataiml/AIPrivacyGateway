@@ -154,8 +154,12 @@ async def test_outbound_payload_carries_tokens_and_no_originals(router: respx.Mo
         contents=(f"Contact {EMAIL_TOKEN} or {PHONE_TOKEN}.", f"Confirm {EMAIL_TOKEN}.")
     )
 
-    # Act
-    await build_provider().complete(request)
+    # Act -- deliberately generous timeouts. The default ones here are tuned for
+    # the retry and deadline tests, and the OpenAI SDK resolves platform details
+    # in a worker thread on its first request; under `pytest --cov` that lands
+    # outside a 4.5-second budget and this test fails on timing rather than on
+    # what it is actually asserting.
+    await build_provider(connect_timeout_seconds=5.0, read_timeout_seconds=15.0).complete(request)
 
     # Assert
     sent = route.calls.last.request

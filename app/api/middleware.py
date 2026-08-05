@@ -144,9 +144,28 @@ class BodySizeLimitMiddleware:
     limit is passed rather than buffering the whole payload first.
     """
 
-    def __init__(self, app: ASGIApp, *, max_bytes: int) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        max_bytes: int,
+        upload_max_bytes: int | None = None,
+        upload_path_prefixes: tuple[str, ...] = (),
+    ) -> None:
         self.app = app
         self.max_bytes = max_bytes
+        # Uploads need a far larger ceiling than JSON does. Raising the single
+        # global limit to suit them would let every other endpoint accept a
+        # multi-megabyte body it has no use for, so the exemption is scoped to
+        # the paths that actually carry files.
+        self.upload_max_bytes = upload_max_bytes if upload_max_bytes is not None else max_bytes
+        self.upload_path_prefixes = upload_path_prefixes
+
+    def limit_for(self, path: str) -> int:
+        """Return the byte ceiling that applies to ``path``."""
+        if any(path.startswith(prefix) for prefix in self.upload_path_prefixes):
+            return self.upload_max_bytes
+        return self.max_bytes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -154,11 +173,12 @@ class BodySizeLimitMiddleware:
             return
 
         request = Request(scope)
+        limit = self.limit_for(request.url.path)
 
         declared = request.headers.get(CONTENT_LENGTH_HEADER)
         if declared is not None:
             try:
-                if int(declared) > self.max_bytes:
+                if int(declared) > limit:
                     await self._reject(ErrorCode.REQUEST_TOO_LARGE, request, send)
                     return
             except ValueError:
@@ -175,7 +195,7 @@ class BodySizeLimitMiddleware:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_bytes:
+                if received > limit:
                     exceeded = True
                     # Hand the app an empty terminal chunk. It will fail
                     # validation harmlessly; the response is replaced below.

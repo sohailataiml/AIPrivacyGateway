@@ -7,6 +7,9 @@ is stored.
 | Data | Classification | Storage | Encryption | Retention | Logging |
 |---|---|---|---|---|---|
 | Original document | Restricted | Object store | App-layer AEAD | Policy-defined | Never |
+| Document filename | Restricted | PostgreSQL | App-layer AEAD | With the document | Never |
+| Document metadata | Internal | PostgreSQL | At rest + TLS | With the document | Allowed |
+| Object storage key | Internal | PostgreSQL / object store | None needed | With the document | Allowed |
 | Extracted text | Restricted | Prefer none | Required if retained | Minimal | Never |
 | Original entity value | Restricted | Redis | App-layer AEAD | Session TTL | Never |
 | Security token | Confidential | Redis / protected payload | TLS | Session TTL | Full token prohibited |
@@ -32,6 +35,21 @@ is stored.
 
 ## Notes that are easy to get wrong
 
+- **A filename is Restricted, and it is the row most often got wrong.**
+  `Okonkwo-Vasquez-oncology-summary.pdf` names a person and a specialty before
+  the file is opened. It is the one encrypted column in the `documents` table,
+  sealed under the same per-document key as the body but with a different
+  purpose, so the two ciphertexts are not interchangeable. It is returned to the
+  principal who uploaded it and to nobody else, and it appears in no log line,
+  no metric label, and no error message. The `status` route deliberately does
+  not carry it: the cheap pollable route should not decrypt.
+- **An object storage key is Internal, not Confidential — because of what it is
+  not.** It is a random opaque id with no tenant, no user, no filename, and no
+  extension, so seeing it discloses nothing. It is also not a credential:
+  the bucket is private, and the ciphertext it names is bound to a tenant, a
+  user, and a document id, so copying an object to another key produces bytes
+  that do not authenticate. Both properties are needed. Either one alone would
+  make this row wrong.
 - **Extracted text is as sensitive as the document it came from.** It is
   plaintext originals in bulk, minus the file format. The default is not to
   retain it; temporary files are deleted immediately, including on error paths.

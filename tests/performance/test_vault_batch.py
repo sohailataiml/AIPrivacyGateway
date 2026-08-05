@@ -165,9 +165,7 @@ async def test_resolving_a_document_sized_response_is_one_round_trip(
 
     # Act
     started = time.perf_counter()
-    resolved = await vault.resolve_many(
-        tenant_id=TENANT, session_id=session, tokens=set(tokens)
-    )
+    resolved = await vault.resolve_many(tenant_id=TENANT, session_id=session, tokens=set(tokens))
     elapsed_ms = (time.perf_counter() - started) * 1000
 
     # Assert

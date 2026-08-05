@@ -189,6 +189,17 @@ def settings() -> Settings:
     return make_settings()
 
 
+STARTUP_TIMEOUT_SECONDS = 60.0
+"""Generous on purpose.
+
+``asgi_lifespan`` defaults to five seconds, and startup warms the spaCy
+pipeline. Under ``pytest --cov`` that instrumented load overruns the default
+and every test in the file errors at setup -- a red suite that says nothing
+about the code. Still bounded, so a genuinely hung startup fails rather than
+blocking the run forever.
+"""
+
+
 @pytest.fixture
 def keys() -> Keys:
     full, full_raw = make_key(tenant_id=TENANT_A, scopes=tuple(Scope))
@@ -249,7 +260,7 @@ async def api(settings: Settings, services: Services, keys: Keys) -> AsyncIterat
     app = create_app(settings)
     app.state.services = services
     app.state.api_key_authenticator = FakeApiKeyAuthenticator(keys.records)
-    async with LifespanManager(app):
+    async with LifespanManager(app, startup_timeout=STARTUP_TIMEOUT_SECONDS):
         transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
         async with httpx.AsyncClient(transport=transport, base_url="http://gateway") as client:
             yield Api(client=client, keys=keys)
@@ -469,9 +480,7 @@ class TestMetricsExposure:
     check that none of them leaked.
     """
 
-    async def test_a_real_request_leaves_no_sensitive_value_in_the_payload(
-        self, api: Api
-    ) -> None:
+    async def test_a_real_request_leaves_no_sensitive_value_in_the_payload(self, api: Api) -> None:
         chat = await api.chat(api.keys.full_a)
         assert chat.status_code == 200
         session_id = chat.json()["session_id"]
@@ -487,9 +496,7 @@ class TestMetricsExposure:
         # And any token minted for the values above.
         assert LEFT_DELIMITER not in payload
 
-    async def test_a_real_request_is_actually_reflected_in_the_payload(
-        self, api: Api
-    ) -> None:
+    async def test_a_real_request_is_actually_reflected_in_the_payload(self, api: Api) -> None:
         """The counterpart to the test above: absence proves nothing if the
         instruments never fired."""
         await api.chat(api.keys.full_a)

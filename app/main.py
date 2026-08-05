@@ -28,6 +28,7 @@ from app.api.middleware import (
 )
 from app.api.v1.chat import router as chat_router
 from app.api.v1.detect import router as detect_router
+from app.api.v1.documents import router as documents_router
 from app.api.v1.health import router as health_router
 from app.api.v1.metrics import router as metrics_router
 from app.api.v1.sessions import router as sessions_router
@@ -35,6 +36,14 @@ from app.config.settings import Settings, get_settings
 from app.observability.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
+
+_MULTIPART_OVERHEAD_BYTES = 8_192
+"""Headroom for multipart boundaries, part headers, and the filename field.
+
+Without it a document of exactly ``MAX_DOCUMENT_BYTES`` would be rejected by
+the transport limit before the document limit ever saw it, and the caller would
+get a confusing ``REQUEST_TOO_LARGE`` instead of ``DOCUMENT_TOO_LARGE``.
+"""
 
 
 @asynccontextmanager
@@ -101,7 +110,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allow_methods=["GET", "POST", "DELETE"],
             allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
         )
-    application.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_request_bytes)
+    application.add_middleware(
+        BodySizeLimitMiddleware,
+        max_bytes=settings.max_request_bytes,
+        # Uploads are the one route family that legitimately carries
+        # megabytes. Everything else stays on the small JSON ceiling.
+        upload_max_bytes=settings.max_document_bytes + _MULTIPART_OVERHEAD_BYTES,
+        upload_path_prefixes=("/v1/documents",) if settings.documents_enabled else (),
+    )
     # Outside the size limit so a rejected oversized body is still counted, and
     # inside the request id so a metric and a log line describe the same span.
     application.add_middleware(MetricsMiddleware)
@@ -111,6 +127,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(chat_router)
     application.include_router(detect_router)
     application.include_router(sessions_router)
+    if settings.documents_enabled:
+        application.include_router(documents_router)
     if settings.metrics_enabled:
         # Absent rather than forbidden when disabled: a route that exists and
         # refuses still confirms the deployment has metrics worth asking for.

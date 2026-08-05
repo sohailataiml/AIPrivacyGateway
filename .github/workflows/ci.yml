@@ -69,6 +69,16 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://gateway:gateway@localhost:5432/gateway_test
       REDIS_URL: redis://localhost:6379/0
+      TEST_REDIS_URL: redis://localhost:6379/15
+      # The object store suite skips without this, and a skipped storage test
+      # verifies the adapter against nothing.
+      TEST_OBJECT_STORE_ENDPOINT: http://localhost:9000
+      TEST_OBJECT_STORE_ACCESS_KEY_ID: sgw-ci-access-key
+      TEST_OBJECT_STORE_SECRET_ACCESS_KEY: sgw-ci-secret-key-not-for-production
+      TEST_OBJECT_STORE_BUCKET: sgw-documents
+      # Turns "MinIO did not start" into a failing build rather than a green
+      # one with the whole object store suite silently skipped.
+      REQUIRE_OBJECT_STORE_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -76,10 +86,35 @@ jobs:
           enable-cache: true
       - run: uv sync --all-extras
       - run: uv run python -m spacy download en_core_web_lg
+
+      # Not a `services:` entry: MinIO needs a command argument (`server /data`)
+      # and GitHub's service containers cannot supply one.
+      - name: Start MinIO and create the bucket
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER="$TEST_OBJECT_STORE_ACCESS_KEY_ID" \
+            -e MINIO_ROOT_PASSWORD="$TEST_OBJECT_STORE_SECRET_ACCESS_KEY" \
+            minio/minio:latest server /data
+          for _ in $(seq 1 60); do
+            curl -sf http://localhost:9000/minio/health/live && break
+            sleep 1
+          done
+          curl -sf http://localhost:9000/minio/health/live
+          docker run --rm --network host --entrypoint sh minio/mc:latest -c "
+            mc alias set ci http://localhost:9000 \
+              '$TEST_OBJECT_STORE_ACCESS_KEY_ID' '$TEST_OBJECT_STORE_SECRET_ACCESS_KEY' &&
+            mc mb --ignore-existing ci/$TEST_OBJECT_STORE_BUCKET &&
+            mc anonymous set none ci/$TEST_OBJECT_STORE_BUCKET"
+
       - run: uv run alembic upgrade head
       - run: uv run pytest tests/integration -m integration
       - run: uv run pytest tests/privacy -m privacy
       - run: uv run pytest tests/security -m security
+
+      # One session over the whole tree. Each suite above passes in isolation;
+      # a defect where application startup leaves global state behind is only
+      # visible when one process runs all of them. See PROGRESS.md defect 17.
+      - run: uv run pytest tests -m "not performance"
 
   security-scan:
     name: dependency and secret scan

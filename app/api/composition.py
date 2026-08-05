@@ -17,7 +17,7 @@ Two rules govern the wiring:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -33,6 +33,10 @@ from app.config.settings import Settings
 from app.db.session import build_engine_from_settings, build_session_factory
 from app.detection.config import DetectionConfig
 from app.detection.engine import PresidioDetector
+from app.documents.crypto import DocumentCipher
+from app.documents.protocol import DocumentStore
+from app.documents.service import DocumentService
+from app.documents.storage.s3 import S3CompatibleDocumentStore
 from app.llm.registry import build_default_registry
 from app.observability.logging import get_logger
 from app.pipeline.service import SecurePipeline
@@ -40,7 +44,7 @@ from app.policy.service import PolicyService
 from app.restoration.pipeline import OutputPipeline
 from app.tokenization.tokenizer import Tokenizer
 from app.vault.crypto import EnvelopeCipher
-from app.vault.keys import SettingsKeyRing
+from app.vault.keys import DocumentSettingsKeyRing, SettingsKeyRing
 from app.vault.redis_vault import RedisTokenVault
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -65,6 +69,8 @@ class Services:
     vault: RedisTokenVault
     audit: AuditService
     rate_limiter: RedisRateLimiter
+    documents: DocumentService | None
+    """``None`` when ``DOCUMENTS_ENABLED`` is false and the routes are absent."""
 
     def session_scope(self) -> AbstractAsyncContextManager[AsyncSession]:
         """Open one short-lived session."""
@@ -87,11 +93,12 @@ async def build_services(
     *,
     redis: Redis | None = None,
     engine: AsyncEngine | None = None,
+    document_store: DocumentStore | None = None,
 ) -> Services:
     """Construct every long-lived service. Raises if a dependency is unreachable.
 
-    ``redis`` and ``engine`` exist so tests can supply fakes. Production passes
-    neither and gets clients built from settings. Without these seams the
+    ``redis``, ``engine``, and ``document_store`` exist so tests can supply
+    fakes. Production passes none of them and builds clients from settings. Without these seams the
     lifespan would be reachable only with a live Redis and PostgreSQL, which in
     practice means it would not be tested at all.
 
@@ -134,6 +141,12 @@ async def build_services(
         settings=settings,
     )
 
+    documents = (
+        _build_document_service(settings, scope, document_store)
+        if settings.documents_enabled
+        else None
+    )
+
     return Services(
         settings=settings,
         engine=engine,
@@ -144,6 +157,24 @@ async def build_services(
         vault=vault,
         audit=audit,
         rate_limiter=RedisRateLimiter(redis=redis),
+        documents=documents,
+    )
+
+
+def _build_document_service(
+    settings: Settings,
+    scope: Callable[[], AbstractAsyncContextManager[AsyncSession]],
+    store: DocumentStore | None = None,
+) -> DocumentService:
+    """Assemble document storage. Its own key ring, separate from the vault's."""
+    return DocumentService(
+        store=store if store is not None else S3CompatibleDocumentStore.from_settings(settings),
+        cipher=DocumentCipher(
+            DocumentSettingsKeyRing(settings),
+            chunk_bytes=settings.document_chunk_bytes,
+        ),
+        session_scope=scope,
+        max_document_bytes=settings.max_document_bytes,
     )
 
 
@@ -161,13 +192,17 @@ async def stop_services(services: Services) -> None:
     Each step is guarded: one failing close must not skip the rest, or a failed
     shutdown leaks a connection pool into whatever replaces this process.
     """
-    for name, close in (
+    closers: list[tuple[str, Callable[[], Awaitable[object]]]] = [
         # The audit queue writes to PostgreSQL, so it drains before the engine
         # is disposed -- otherwise queued events die with the pool.
         ("audit", services.audit.stop),
         ("redis", services.redis.aclose),
-        ("engine", services.engine.dispose),
-    ):
+    ]
+    if services.documents is not None:
+        closers.append(("documents", services.documents.aclose))
+    closers.append(("engine", services.engine.dispose))
+
+    for name, close in closers:
         try:
             await close()
         except Exception:  # shutdown continues regardless of one bad step

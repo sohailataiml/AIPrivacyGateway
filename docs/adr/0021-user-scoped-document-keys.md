@@ -69,3 +69,49 @@ authentication failure, not plaintext.
   distinguish "wrong user" from "no such document" — absence and denial look
   identical to the caller, as they do for vault tokens.
 - Key material is never written to logs, audit records, or metrics labels.
+
+## As Built (Phase 1)
+
+**Derivation, not wrapping.** The ring key encrypts nothing. Each document's
+data key is derived with HKDF-SHA256 from the ring key, a per-document 16-byte
+salt stored in the object header, and an `info` string carrying the
+`tenant | user | document` triple. Two documents therefore never share a key,
+and a key recovered from one reveals nothing about another.
+
+**What the associated data carries.** Every frame's AAD is a
+length-prefixed join of: a domain separator, the format version, tenant, user,
+document, content type, schema version, purpose, chunk index, and whether the
+chunk is the last one. Each field defeats a distinct attack, and each has its
+own test in `tests/security/test_document_crypto_isolation.py`:
+
+| Field | What it stops |
+|---|---|
+| tenant, user, document | An object relocated to another principal |
+| content type, schema version | The same bytes reinterpreted as another type |
+| purpose | A sealed filename opened as a body, or the reverse |
+| chunk index | Frames reordered or duplicated within a document |
+| final flag | A document truncated part-way |
+
+Dropping any one of them removes exactly one defence while every round-trip
+test keeps passing, which is why they are tested individually.
+
+**Filenames are sealed too.** A filename such as
+`Okonkwo-Vasquez-oncology-summary.pdf` names a person and a specialty before the
+file is opened, so it is Restricted. It is sealed under the same per-document
+key with `purpose = "filename"` and stored in the `filename_ciphertext` column.
+The two ciphertexts are not interchangeable.
+
+**Who "user" is, for now.** The gateway authenticates API keys rather than
+people, so the authenticated subject is the API key id. Two keys in the same
+tenant are two different principals and cannot read each other's documents.
+`app/api/v1/documents.py::_user_id` is the single place that changes when a user
+model arrives.
+
+**Ring separation.** Documents use `DOCUMENT_ACTIVE_KEY_ID` and `DOCUMENT_KEY_*`,
+which are separate from the vault's `VAULT_*` ring on purpose: the two protect
+data with different lifetimes and rotate on different schedules.
+
+**Not built in this phase.** No key rotation tooling and no re-encryption or
+re-wrap path, so the sharing story described above remains unexpressible rather
+than merely discouraged. The format supports rotation — the key id travels with
+each object — but nothing yet drives it.

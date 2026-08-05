@@ -70,3 +70,59 @@ never the only control.
   no unencrypted fallback path.
 - Document identifiers follow the canonical random-id grammar — not sequential,
   not timestamped, consistent with the token-id rule in ADR-0006.
+
+## As Built (Phase 1)
+
+Storage is implemented; extraction is not. This section records what actually
+exists, so the ADR can be checked against the code rather than trusted.
+
+**Modules.** `app/documents/` holds `crypto.py` (the wire format and the
+cipher), `models.py` (domain types and the accepted-type table), `validation.py`
+(pure boundary checks), `repository.py` (tenant- and user-scoped metadata),
+`service.py` (the order of operations), `protocol.py` (the `DocumentStore`
+seam), and `storage/` with the aioboto3 adapter and an in-memory fake.
+`app/api/v1/documents.py` exposes four routes under `/v1`, versioned like every
+other route in the gateway.
+
+**Encryption is chunked, not single-shot.** A document is sealed as a sequence
+of independently authenticated AES-256-GCM frames, because single-shot GCM
+authenticates a whole message and would force the entire file into memory to
+encrypt and again to verify. The wire format is:
+
+```text
+SGWD | version | key-id length | key id | HKDF salt (16) | chunk size (u32)
+then, repeated: nonce (12) | ciphertext + tag
+```
+
+The key id travels with the object, so a rotated ring still opens documents
+sealed before the rotation — the same property as the vault envelope in
+ADR-0004.
+
+**Streaming end to end.** Upload and download both stream. The adapter switches
+to S3 multipart past 5 MiB and fills each part to the minimum size, because S3
+rejects any part but the last below it. A multipart upload that fails part-way —
+including one cancelled by a client disconnect — is explicitly aborted; parts
+left behind are invisible in an object listing and are billed until a lifecycle
+rule finds them.
+
+**The store is told nothing about the content.** Objects are written with
+content type `application/octet-stream` and no user metadata. The authoritative
+type is the database column, which is bound into the associated data. The
+storage key is a random opaque id under a `documents/` prefix: no tenant, no
+user, no filename, no extension.
+
+**Order of operations is a safety property.** Validate (pure) → insert a
+`receiving` row → stream the body through one pass that counts, hashes, bounds,
+and sniffs it, sealing and uploading as it goes → only then mark the row
+`stored`. A request destined to fail leaves nothing to clean up, and a row never
+claims `stored` for an object that is not there.
+
+**Status has three members and no more.** `receiving`, `stored`, `failed`.
+There is deliberately no `extracted` or `protected`: a status the system cannot
+reach is a lie told to whoever polls for it.
+
+**Not built in this phase.** No extraction, no segmentation, no detection, no
+tokenization, no restoration, and no retention policy enforcement — documents
+persist until deleted. The constraints above about extracted text and temporary
+plaintext files describe the phase that adds extraction, and nothing in the
+codebase yet implements or violates them.

@@ -73,14 +73,29 @@ These extend the rule above to five further areas: **document storage and
 extraction**, **vault interaction shape**, **session lifecycle**, **restoration
 behavior**, and **local infrastructure choices**.
 
+### ADRs with an "As Built" section
+
+Most ADRs here record a decision that has not yet been implemented. Two record
+one that has, and carry an **As Built** section describing the shipped
+reality — the wire format, the derivation, the AAD fields, and explicitly what
+the phase did *not* build:
+
+- [0020](0020-encrypted-document-storage.md) — encrypted document storage
+- [0021](0021-user-scoped-document-keys.md) — user-scoped document keys
+
+Where an ADR has an As Built section, that section is the one to check code
+against. The Decision above it says what was agreed; the As Built section says
+what exists, and the two are kept honest by tests named in it.
+
 ## Supporting Documents
 
 The ADRs above are the decisions. These describe what follows from them:
 
+- [NFR.md](../../NFR.md) — non-functional requirements, each labelled enforced, implemented, or specified, with the known gaps stated
 - [data-classification.md](../data-classification.md) — every data type, its classification, and the storage, encryption, retention, and logging rules that follow
-- [threat-model.md](../threat-model.md) — vault threats, controls, and residual risk
+- [threat-model.md](../threat-model.md) — vault and document-storage threats, controls, and residual risk
 - [audit-evidence.md](../audit-evidence.md) — what an audit record holds, and what it does and does not prove
-- [document-processing.md](../document-processing.md) — the document pipeline specification
+- [document-processing.md](../document-processing.md) — the document pipeline, with the built/specified boundary marked at each step
 - [performance.md](../performance.md) — benchmark targets and measurement method
 - [observability.md](../observability.md) — metrics, `/metrics`, and runtime alerting
 - [README-risk-awareness.md](../README-risk-awareness.md) — tradeoffs and limitations in plain terms

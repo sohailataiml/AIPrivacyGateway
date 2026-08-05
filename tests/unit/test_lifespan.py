@@ -19,12 +19,24 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from app.api.composition import Services, build_services, stop_services
 from app.config.settings import Settings
 from app.db.base import Base
+from app.documents.storage.fakes import FakeDocumentStore
 from app.main import create_app
 
 
 async def _raise_unreachable(*_args: object, **_kwargs: object) -> None:
     """Stand in for a dependency that cannot be reached."""
     raise ConnectionError("simulated outage")
+
+
+STARTUP_TIMEOUT_SECONDS = 60.0
+"""Generous on purpose.
+
+``asgi_lifespan`` defaults to five seconds, and startup warms the spaCy
+pipeline. Under ``pytest --cov`` that instrumented load overruns the default
+and every test in the file errors at setup -- a red suite that says nothing
+about the code. Still bounded, so a genuinely hung startup fails rather than
+blocking the run forever.
+"""
 
 
 @pytest.fixture
@@ -42,6 +54,9 @@ async def services(settings: Settings) -> AsyncIterator[Services]:
         settings,
         redis=fakeredis.aioredis.FakeRedis(decode_responses=False),
         engine=engine,
+        # Same reason as the Redis and engine fakes: without it, readiness
+        # would be reachable only with a live MinIO.
+        document_store=FakeDocumentStore(),
     )
     yield built
     await stop_services(built)
@@ -56,7 +71,7 @@ class TestStartup:
         app = create_app(settings)
         app.state.services = services
 
-        async with LifespanManager(app):
+        async with LifespanManager(app, startup_timeout=STARTUP_TIMEOUT_SECONDS):
             for name in ("redis", "db_session_factory", "rate_limiter", "settings"):
                 assert getattr(app.state, name, None) is not None, name
 
@@ -70,7 +85,7 @@ class TestStartup:
         app.state.services = services
 
         with pytest.raises(ConnectionError):
-            async with LifespanManager(app):
+            async with LifespanManager(app, startup_timeout=STARTUP_TIMEOUT_SECONDS):
                 pass
 
     async def test_a_failed_startup_still_releases_handles(
@@ -94,7 +109,7 @@ class TestStartup:
         monkeypatch.setattr(type(services.engine), "dispose", record_dispose)
 
         with pytest.raises(RuntimeError, match="detector model missing"):
-            async with LifespanManager(app):
+            async with LifespanManager(app, startup_timeout=STARTUP_TIMEOUT_SECONDS):
                 pass
 
         # Startup had already opened the pool before it failed. It must be
@@ -135,7 +150,7 @@ class TestReadiness:
     ) -> AsyncIterator[httpx.AsyncClient]:
         app = create_app(settings)
         app.state.services = services
-        async with LifespanManager(app):
+        async with LifespanManager(app, startup_timeout=STARTUP_TIMEOUT_SECONDS):
             transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
             async with httpx.AsyncClient(transport=transport, base_url="http://t") as instance:
                 yield instance
@@ -146,7 +161,13 @@ class TestReadiness:
         assert response.status_code == 200
         body = response.json()
         assert body["status"] == "ready"
-        assert body["dependencies"] == {"redis": "up", "database": "up"}
+        assert body["dependencies"] == {
+            "redis": "up",
+            "database": "up",
+            # Present because DOCUMENTS_ENABLED defaults on. A deployment that
+            # turns uploads off does not report a dependency it never uses.
+            "object_store": "up",
+        }
 
     async def test_reports_503_when_a_dependency_is_down(
         self, client: httpx.AsyncClient, services: Services, monkeypatch: pytest.MonkeyPatch
