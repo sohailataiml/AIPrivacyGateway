@@ -39,7 +39,14 @@ async function forward(request: NextRequest, path: string[]): Promise<Response> 
   const headers = new Headers();
   // Copy only what the upstream needs. Hop-by-hop headers and Next's own
   // internals are deliberately not passed along.
-  for (const name of ["content-type", "accept", "content-length"]) {
+  //
+  // `content-length` is pointedly NOT copied. The body is re-streamed, so the
+  // inbound length no longer describes what goes out; fetch sends chunked and
+  // the stale header either truncates the body or makes the request malformed.
+  // Either way the gateway sees an unparseable payload and answers
+  // INVALID_REQUEST -- a validation error that says nothing about the proxy
+  // that caused it.
+  for (const name of ["content-type", "accept"]) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
