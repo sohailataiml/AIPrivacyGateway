@@ -90,8 +90,16 @@ export class GatewayError extends Error {
   }
 }
 
-export const GATEWAY_ORIGIN =
-  process.env.NEXT_PUBLIC_GATEWAY_ORIGIN ?? "http://localhost:8000";
+export const GATEWAY_ORIGIN = "/api";
+/**
+ * Same-origin, always. Requests go to this app's proxy route, which attaches a
+ * server-side demo key and forwards to the gateway.
+ *
+ * Deliberately not a `NEXT_PUBLIC_*` gateway URL any more. Pointing the browser
+ * straight at the API meant every visitor needed a credential, and the only way
+ * to avoid that would have been shipping one in the client bundle. Going
+ * through the proxy also makes CORS irrelevant for the workspace.
+ */
 
 async function refuse(response: Response): Promise<never> {
   let body: GatewayErrorBody | null = null;
@@ -106,7 +114,10 @@ async function refuse(response: Response): Promise<never> {
 }
 
 function authHeaders(apiKey: string): HeadersInit {
-  return { Authorization: `Bearer ${apiKey}` };
+  // Empty when the caller has no key of their own -- the proxy then fills in
+  // the demo credential server-side. Sending `Bearer ` with nothing after it
+  // would be a malformed header rather than an absent one.
+  return apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
 }
 
 export interface ChatRequestInput {

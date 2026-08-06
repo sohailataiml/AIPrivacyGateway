@@ -51,7 +51,6 @@ let turnCounter = 0;
 const nextId = () => `turn-${++turnCounter}`;
 
 export default function ChatWorkspace() {
-  const authenticated = useSyncExternalStore(subscribe, hasApiKey, () => false);
   const keyLabel = useSyncExternalStore(subscribe, apiKeyLabel, () => null);
 
   const [turns, setTurns] = useState<readonly Turn[]>([]);
@@ -59,6 +58,8 @@ export default function ChatWorkspace() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [stage, setStage] = useState<InspectorStage>("idle");
   const [snapshot, setSnapshot] = useState<Snapshot>(EMPTY);
+  const [showKeyForm, setShowKeyForm] = useState(false);
+  const usingOwnKey = useSyncExternalStore(subscribe, hasApiKey, () => false);
 
   const append = useCallback((turn: Omit<Turn, "id">) => {
     setTurns((current) => [...current, { ...turn, id: nextId() }]);
@@ -66,8 +67,9 @@ export default function ChatWorkspace() {
 
   const send = useCallback(
     async (text: string) => {
-      const apiKey = getApiKey();
-      if (!apiKey) return;
+      // Empty string is valid: the proxy attaches the demo key server-side when
+      // the caller has none. Only a caller who pasted their own key sends one.
+      const apiKey = getApiKey() ?? "";
 
       const file = attachment;
       append({ author: "you", text, documentName: file?.name });
@@ -146,6 +148,8 @@ export default function ChatWorkspace() {
     <main className="grid h-screen grid-rows-[auto_1fr] bg-surface">
       <Header
         keyLabel={keyLabel}
+        usingOwnKey={usingOwnKey}
+        onToggleKeyForm={() => setShowKeyForm((open) => !open)}
         sessionId={sessionId}
         onClearSession={() => {
           // A new session is a new vault namespace: tokens from the old one
@@ -159,8 +163,8 @@ export default function ChatWorkspace() {
         onSignOut={clearApiKey}
       />
 
-      {authenticated ? (
-        <div className="grid min-h-0 grid-cols-1 gap-4 p-4 lg:grid-cols-[1fr_22rem]">
+      <div className="grid min-h-0 grid-cols-1 gap-4 p-4 lg:grid-cols-[1fr_22rem]">
+        {showKeyForm ? <ApiKeyGate onDone={() => setShowKeyForm(false)} /> : null}
           <section className="panel flex min-h-0 flex-col">
             <Conversation turns={turns} />
             <Composer
@@ -180,21 +184,22 @@ export default function ChatWorkspace() {
             elapsedMs={snapshot.elapsedMs}
             refusalCode={snapshot.refusalCode}
           />
-        </div>
-      ) : (
-        <ApiKeyGate />
-      )}
+      </div>
     </main>
   );
 }
 
 function Header({
   keyLabel,
+  usingOwnKey,
+  onToggleKeyForm,
   sessionId,
   onClearSession,
   onSignOut,
 }: {
   keyLabel: string | null;
+  usingOwnKey: boolean;
+  onToggleKeyForm: () => void;
   sessionId: string | null;
   onClearSession: () => void;
   onSignOut: () => void;
@@ -207,38 +212,47 @@ function Header({
           {DEFAULT_PROVIDER} · {DEFAULT_MODEL}
         </span>
       </div>
-      {keyLabel ? (
-        <div className="flex items-center gap-2">
-          <span className="font-mono text-[11px] text-muted">{keyLabel}</span>
-          <button type="button" className="btn-quiet" onClick={onClearSession} disabled={!sessionId}>
-            Clear session
-          </button>
+      <div className="flex items-center gap-2">
+        <span className="font-mono text-[11px] text-muted">
+          {usingOwnKey ? keyLabel : "demo credential"}
+        </span>
+        <button type="button" className="btn-quiet" onClick={onClearSession} disabled={!sessionId}>
+          Clear session
+        </button>
+        {usingOwnKey ? (
           <button type="button" className="btn-quiet" onClick={onSignOut}>
-            Sign out
+            Use demo key
           </button>
-        </div>
-      ) : null}
+        ) : (
+          <button type="button" className="btn-quiet" onClick={onToggleKeyForm}>
+            Use my key
+          </button>
+        )}
+      </div>
     </header>
   );
 }
 
-function ApiKeyGate() {
+function ApiKeyGate({ onDone }: { onDone: () => void }) {
   const [value, setValue] = useState("");
   return (
-    <div className="flex items-center justify-center p-8">
+    <div className="flex items-start justify-center p-8">
       <form
         className="panel w-full max-w-md space-y-4 p-6"
         onSubmit={(event) => {
           event.preventDefault();
           setApiKey(value);
           setValue("");
+          onDone();
         }}
       >
         <div>
-          <h2 className="text-sm font-semibold">API key</h2>
+          <h2 className="text-sm font-semibold">Use your own API key</h2>
           <p className="mt-1 text-xs text-muted">
-            Held in memory for this tab only and lost on reload. It is never written to
-            local storage, session storage, or a cookie (ADR-0019).
+            Optional. Without one, requests use a demo credential attached
+            server-side, which the browser never sees. Either way no key is
+            written to local storage, session storage, or a cookie (ADR-0019) --
+            one you paste here is held in memory for this tab and lost on reload.
           </p>
         </div>
         <label htmlFor="api-key" className="sr-only">
