@@ -17,3 +17,6 @@ build/
 .idea/
 .vscode/
 reports/
+
+# Real deployment secrets, filled in locally and never committed.
+deploy.env
