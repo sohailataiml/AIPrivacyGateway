@@ -20,3 +20,4 @@ reports/
 
 # Real deployment secrets, filled in locally and never committed.
 deploy.env
+deploy.secrets.txt

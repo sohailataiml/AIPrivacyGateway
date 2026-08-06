@@ -37,9 +37,19 @@ services:
     plan: starter
     image:
       url: docker.io/minio/minio:latest
-    # `--console-address` is omitted deliberately: the console is an admin UI and
-    # this service has no ingress. Administer it through `mc` from a shell.
-    dockerCommand: minio server /data
+    # Two things here are not obvious and were both found by deploying:
+    #
+    #   * Render routes a private service on **port 10000**, not the image's
+    #     default. MinIO must be told to listen there or the gateway's S3 calls
+    #     reach a closed port -- which surfaces as `object_store: down` at
+    #     readiness with nothing wrong in either service's own log.
+    #   * MinIO treats a top-level directory under its data dir as a bucket, so
+    #     creating it before startup is how the bucket comes to exist. Compose
+    #     uses a `minio-init` service for this; Render has no equivalent hook,
+    #     and without it the first upload fails.
+    #
+    # The console is deliberately not exposed: this service has no ingress.
+    dockerCommand: sh -c "mkdir -p /data/sgw-documents && exec minio server /data --address :10000"
     disk:
       name: sgw-objects
       mountPath: /data
@@ -138,7 +148,12 @@ services:
     runtime: node
     plan: starter
     rootDir: frontend
-    buildCommand: npm ci && npm run build
+    # `--include=dev` is required, not stylistic. NODE_ENV=production below
+    # makes plain `npm ci` skip devDependencies, and Tailwind, PostCSS, and
+    # autoprefixer live there -- so the CSS pipeline fails at build time with a
+    # module-resolution error inside PostCSS rather than anything that names
+    # the real cause.
+    buildCommand: npm ci --include=dev && npm run build
     startCommand: npm run start
     envVars:
       - key: NODE_ENV
