@@ -24,7 +24,9 @@ import pytest
 from app.detection.config import DetectionConfig
 from app.detection.entities import EMAIL_ADDRESS, PERSON, PHONE_NUMBER, US_SSN
 from app.detection.fakes import FakeDetector
-from app.documents.outbound import (
+from app.domain.errors import DetectorUnavailableError
+from app.domain.models import ChatMessage, EntityAction, ProtectedChatRequest
+from app.outbound import (
     SERIALIZATION_VERSION,
     OutboundScan,
     ScanVerdict,
@@ -32,8 +34,6 @@ from app.documents.outbound import (
     scan_outbound,
     serialize_outbound,
 )
-from app.domain.errors import DetectorUnavailableError
-from app.domain.models import ChatMessage, EntityAction, ProtectedChatRequest
 from app.policy.models import EntityRule, PolicySnapshot
 from tests.fixtures.documents import CANARIES, TENANT
 from tests.fixtures.policies import snapshot
@@ -235,8 +235,37 @@ class TestScan:
 
         assert scan.findings == (EMAIL_ADDRESS,)
 
+    async def test_each_message_is_scanned_on_its_own(self) -> None:
+        # The concatenation is deliberately not what gets scanned. Presidio's
+        # NER is context-sensitive: a sentence that yields nothing alone can
+        # yield a DATE_TIME once another sentence precedes it, and protection
+        # ran over each message separately. Scanning the join would report
+        # entities no protection pass could have seen, and refuse ordinary
+        # traffic for a value that exists only at the seam.
+        #
+        # Asserted structurally: the detector records the texts it was given,
+        # and there must be one call per message rather than one for the lot.
+        recorder = _RecordingDetector(detector())
+        request = request_of("first message", "second message")
+
+        await scan_outbound(request, detector=recorder, policy=policy())
+
+        assert recorder.texts == ["first message", "second message"]
+
     def test_the_repr_reports_a_count_not_the_findings(self) -> None:
         scan = OutboundScan(verdict=ScanVerdict.BLOCKED, findings=(US_SSN, EMAIL_ADDRESS))
 
         assert repr(scan) == "OutboundScan(verdict='blocked', findings=2)"
         assert not scan.is_clean
+
+
+class _RecordingDetector:
+    """Wraps a detector and records the exact texts it was asked about."""
+
+    def __init__(self, inner: FakeDetector) -> None:
+        self._inner = inner
+        self.texts: list[str] = []
+
+    async def detect(self, text: str, **kwargs: object) -> list[object]:
+        self.texts.append(text)
+        return await self._inner.detect(text)  # type: ignore[arg-type]

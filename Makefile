@@ -44,6 +44,13 @@ test-privacy: ## Privacy regression suite
 test-security: ## Security control suite
 	$(RUN) pytest tests/security -m security
 
+# The two suites that drive a whole request through the real routers, the real
+# composition root, and a provider adapter that records what crossed the
+# boundary. They are the only place "no original reached the provider" is
+# asserted against something that actually received the payload.
+test-e2e: ## End-to-end request workflows, both routes
+	$(RUN) pytest tests/privacy/test_document_workflow.py tests/privacy/test_outbound_conformance.py
+
 # One session, not four. The per-suite targets above each start the application
 # and each pass in isolation; a defect where startup leaves global state behind
 # only shows when one process runs the whole tree. See PROGRESS.md defect 17.

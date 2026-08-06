@@ -166,6 +166,21 @@ class RequestOutcome:
     pipeline_latency_ms: int | None = None
     error_code: str | None = None
     blocked: bool = False
+    prompt_hmac: str | None = None
+    response_hmac: str | None = None
+    outbound_hmac: str | None = None
+    outbound_scan: str | None = None
+    """Keyed digests and the outbound verdict (ADR-0024).
+
+    Digests, never the things they were computed over. They are hex strings by
+    the time they arrive here, so this type still has no field capable of
+    holding content -- which is the property the whole class exists for.
+
+    All four stay ``None`` when the request never reached serialisation: a
+    request refused at policy resolution has no payload to attest, and a null
+    column saying so is more honest than a digest of something that was never
+    assembled.
+    """
 
 
 def audit_payload(
@@ -190,6 +205,10 @@ def audit_payload(
         "model_alias": attempt.model_alias,
         "status_code": outcome.status_code,
         "error_code": outcome.error_code,
+        "prompt_hmac": outcome.prompt_hmac,
+        "response_hmac": outcome.response_hmac,
+        "outbound_hmac": outcome.outbound_hmac,
+        "outbound_scan": outcome.outbound_scan,
         "blocked": outcome.blocked,
         "input_character_count": outcome.input_character_count,
         "output_character_count": outcome.output_character_count,

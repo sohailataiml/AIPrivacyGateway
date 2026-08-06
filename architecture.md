@@ -962,16 +962,25 @@ so a document destined to fail reaches no vault call.
 
 ---
 
-## 9.15 Outbound Attestation and the Document Route
+## 9.15 The Shared Outbound Boundary
 
 The last four stages, and the first place in this system where a privacy claim
 produces evidence rather than resting on a test (ADR-0024).
 
 | Module | Responsibility |
 |---|---|
-| `app/documents/outbound.py` | Canonical serialization and the pre-transmission scan |
-| `app/documents/pipeline.py` | `DocumentPipeline` — stage order, refusals, and the audit row |
-| `app/api/v1/documents.py` | `POST /v1/documents/{id}/process` |
+| `app/outbound/serialization.py` | The canonical byte string that gets attested |
+| `app/outbound/scan.py` | The pre-transmission privacy scan |
+| `app/outbound/gateway.py` | `OutboundGateway` — the one door to a provider |
+| `app/documents/pipeline.py` | `DocumentPipeline` — document stage order and its audit row |
+| `app/pipeline/service.py` | `SecurePipeline` — the chat path, through the same gateway |
+
+**Both routes share one `OutboundGateway` instance.** A caller cannot reach an
+adapter without passing through `send`, and the scan runs inside it before the
+adapter is touched, so there is no route on which the check can be forgotten.
+`send` accepts an optional `invoke` callable so the chat pipeline can supply its
+deadline and concurrency bound — that injects *how* the adapter is awaited,
+never *whether*.
 
 ### Order
 
@@ -990,10 +999,15 @@ identical payloads attest identically and a digest can be recomputed.
 
 ### The scan
 
-Detection over the exact payload; any finding the policy would act on refuses the
-request. Detections inside a gateway token or a redaction are discarded first: a
-token's 26-character identifier reads as an account number, and without that
-exclusion the scan would flag the substitutions protection just made.
+Detection over the payload, **message by message**; any finding the policy would
+act on refuses the request. Two exclusions make it usable rather than
+theoretical:
+
+- Detections inside a gateway token or a redaction are discarded. A token's
+  26-character identifier reads as an account number.
+- Messages are scanned separately rather than concatenated. Presidio's NER is
+  context-sensitive, so the join produces findings no protection pass could have
+  seen and would refuse ordinary traffic.
 
 ### Attestation
 
@@ -1001,10 +1015,11 @@ exclusion the scan would flag the substitutions protection just made.
 domain constant) and `audit_events.outbound_scan` (`clean` or `blocked`), written
 on both paths. A digest, never a payload.
 
-### The route
+### The document route
 
 Requires `documents:read` **and** `chat:invoke`. The instruction travels as a
-system message, separate from the document and untokenized.
+system message, separate from the document and **protected under the same
+session**, so a value it shares with the document resolves to one token.
 
 ---
 
@@ -1415,7 +1430,6 @@ secure-ai-gateway/
 │   │   ├── segmentation.py
 │   │   ├── service.py
 │   │   ├── validation.py
-│   │   ├── outbound.py
 │   │   ├── pipeline.py
 │   │   ├── protection.py
 │   │   ├── analysis/
@@ -1431,6 +1445,10 @@ secure-ai-gateway/
 │   │       └── s3.py
 │   ├── domain/
 │   ├── llm/
+│   ├── outbound/
+│   │   ├── gateway.py
+│   │   ├── scan.py
+│   │   └── serialization.py
 │   ├── observability/
 │   ├── pipeline/
 │   ├── policy/

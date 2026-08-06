@@ -22,7 +22,6 @@ from app.audit.models import AuditRecord
 from app.detection.config import DetectionConfig
 from app.detection.entities import EMAIL_ADDRESS, PERSON
 from app.detection.fakes import FakeDetector
-from app.documents.outbound import serialize_outbound
 from app.documents.pipeline import DocumentAnswer, DocumentPipeline
 from app.documents.protection import ProtectedDocument
 from app.domain.errors import (
@@ -39,6 +38,7 @@ from app.domain.models import (
     Scope,
 )
 from app.llm.registry import ProviderRegistry
+from app.outbound import OutboundGateway, serialize_outbound
 from app.policy.models import EntityRule
 from app.restoration.results import RestoredOutput
 from tests.fixtures.documents import CANARIES, TENANT, USER
@@ -78,19 +78,35 @@ def policy_of(entities: dict[str, EntityRule] | None = None) -> PolicySnapshot:
 # Collaborators
 # ---------------------------------------------------------------------------
 class FakeProtection:
-    def __init__(self, text: str = f"Contact {TOKEN} today.") -> None:
+    def __init__(
+        self, text: str = f"Contact {TOKEN} today.", instruction: str = "Summarise."
+    ) -> None:
         self._text = text
+        self._instruction = instruction
         self.calls = 0
+        self.instructions: list[str] = []
 
     async def protect(
-        self, *, tenant_id: UUID, user_id: UUID, session_id: UUID, document_id: UUID
+        self,
+        *,
+        tenant_id: UUID,
+        user_id: UUID,
+        session_id: UUID,
+        document_id: UUID,
+        instruction: str = "",
     ) -> ProtectedDocument:
         self.calls += 1
+        self.instructions.append(instruction)
+        # Echoed, not fixed: the pipeline must carry the *protected* instruction
+        # onto the payload, and a fake that returned a constant would hide a
+        # pipeline that dropped it.
+        self._instruction = instruction
         return ProtectedDocument(
             tenant_id=tenant_id,
             session_id=session_id,
             document_id=document_id,
             text=self._text,
+            instruction=self._instruction,
             summary=PrivacySummary(detected=1, tokenized=1, entity_types={EMAIL_ADDRESS: 1}),
             policy_version=7,
         )
@@ -165,12 +181,16 @@ def build(
     pipeline = DocumentPipeline(
         protection=protection or FakeProtection(),
         policies=policies or FakePolicies(),
-        detector=detector
-        or FakeDetector(config=DetectionConfig(), person_names=(CANARIES["person_name"],)),
-        providers=ProviderRegistry.from_providers(adapter),
+        # The real shared boundary. Stubbing it would leave every assertion
+        # below passing against a pipeline that never scanned anything.
+        outbound=OutboundGateway(
+            detector=detector
+            or FakeDetector(config=DetectionConfig(), person_names=(CANARIES["person_name"],)),
+            providers=ProviderRegistry.from_providers(adapter),
+            hasher=HASHER,
+        ),
         restorer=restorer or FakeRestorer(),
         audit=sink,
-        hasher=HASHER,
         instruction_max_chars=instruction_max_chars,
     )
     return pipeline, adapter, sink

@@ -1062,6 +1062,34 @@ its input.
 
 ---
 
+## 20e. Phase 15f — Shared Outbound Boundary and Instruction Protection
+
+Security hardening only. No new routes and no schema change. See ADR-0024,
+which this phase completes.
+
+### Tasks
+
+- [x] Extract serialization, the scan, the digests, the provider invocation, and
+      the attestation into `app/outbound/` as one shared component.
+- [x] Route **both** `/v1/chat` and `POST /v1/documents/{id}/process` through the
+      same `OutboundGateway` instance, asserted on object identity.
+- [x] Keep the chat pipeline's deadline and concurrency bound by injecting *how*
+      the adapter is awaited, never *whether*.
+- [x] Detect and protect the caller's document instruction under the same
+      tenant, session, policy snapshot, tokenizer, and vault as the document, so
+      a shared value collapses onto one token.
+- [x] Refuse a blocked instruction entity **before** the document's vault write.
+- [x] Populate `prompt_hmac`, `response_hmac`, `outbound_hmac`, and
+      `outbound_scan` on both routes, preserving nullable semantics for requests
+      refused before serialization.
+
+**Verified 2026-08-06.** The scan was changed to run message by message during
+this phase, because the concatenation produced context-sensitive findings that
+refused ordinary traffic — recorded in ADR-0024's As Built section and in
+PROGRESS.md §4.
+
+---
+
 
 ## 17. Phase 16 — Frontend Bootstrap
 

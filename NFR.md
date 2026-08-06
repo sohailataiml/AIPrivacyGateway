@@ -46,6 +46,9 @@ A requirement with no status label is a requirement nobody has checked.
 | S-18 | A document the policy blocks reaches no vault call | **Enforced** | the block is raised by detection, before protection begins |
 | S-19 | A payload is scanned for surviving originals before transmission, and a finding refuses the request | **Enforced** | ADR-0024, `tests/unit/test_document_pipeline.py::TestOutboundBlock` |
 | S-20 | Processing a document requires both `documents:read` and `chat:invoke` | **Enforced** | the route declares two scopes |
+| S-21 | Every outbound payload, on every route, is scanned before transmission | **Enforced** | one shared `OutboundGateway`; asserted on object identity |
+| S-22 | A caller's document instruction is protected, not sent as written | **Enforced** | `tests/privacy/test_outbound_conformance.py` |
+| S-23 | A value in both the document and the instruction gets one session token | **Enforced** | same tenant, session, policy, tokenizer, and vault |
 
 ### Cryptographic requirements
 
@@ -154,6 +157,7 @@ Runtime alerting: **[docs/observability.md](docs/observability.md)**.
 | O-6 | Every field a module logs survives the allowlist, so a log line means what its call site says | **Enforced** — `test_no_document_log_line_loses_fields_to_the_allowlist`; this was defect 20 |
 | O-7 | Every transmitted document payload has a keyed attestation and a recorded scan verdict | **Enforced** — ADR-0024, written on the success *and* the blocked path |
 | O-8 | An attestation can be recomputed from the payload and the key | **Enforced** — the request id is outside the frame, so identical payloads attest identically |
+| O-9 | `prompt_hmac`, `response_hmac`, `outbound_hmac`, and `outbound_scan` are populated on both routes | **Enforced** — ADR-0024 is fully satisfied; no column is always null |
 
 ---
 
@@ -205,13 +209,16 @@ requirements is marketing.
 5. **`user` means "API key id".** There is no user model, so per-user scoping is
    per-credential scoping. It is a real boundary, but not the one the word
    implies.
-6. **The document path runs end to end, and the chat path does not have the
-   outbound controls.** `POST /v1/documents/{id}/process` scans, attests, and
-   audits; `POST /v1/chat` does none of those. ADR-0024's requirement is met
-   for documents and outstanding for prompts, including `prompt_hmac`, which is
-   still null everywhere.
-7. **A document instruction is not protected.** It is the caller's own text,
-   sent as written; only the outbound scan stands behind it.
+6. **The outbound scan is per message, so a cross-message artifact is not
+   reported.** Presidio's NER is context-sensitive, and scanning the
+   concatenation refuses ordinary traffic for entities that exist only at the
+   seam between two messages. Per-message scanning matches how protection ran.
+   No real value spans two messages; that this is a judgement rather than a
+   proof is the gap.
+7. **Instruction protection costs a second vault batch.** The document and the
+   instruction are two `transform` calls under one session. ADR-0022 forbids a
+   round trip *per token*, not per message, so this is within the rule — but it
+   is two round trips where one would do.
 8. **Extraction is header-and-structure deep, not semantic.** A PDF with a
    well-formed object graph and meaningless content extracts successfully.
    Deciding whether a document *means* anything is not extraction's job.

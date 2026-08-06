@@ -3,8 +3,8 @@
 Status of the Secure AI Gateway against the phase plan in
 [implementation.md](implementation.md).
 
-**As of 2026-08-06** — 120 modules under `app/` · **1,657 tests passing, none
-skipped** (1,446 unit · 77 privacy · 85 security · 49 integration) · **96%
+**As of 2026-08-06** — 123 modules under `app/` · **1,672 tests passing, none
+skipped** (1,447 unit · 91 privacy · 85 security · 49 integration) · **96%
 coverage** (target 90%) · `mypy --strict` clean · ruff clean.
 
 That count is the whole tree in **one session** against live PostgreSQL, Redis,
@@ -17,7 +17,7 @@ Eight have shipped: **ADR-0022, batch vault operations** (§8),
 **ADR-0028/0029/0030, document extraction and segmentation** (Phase 16),
 **ADR-0031/0032, document detection and labeled spans** (Phase 16b),
 **ADR-0033, document protection** (Phase 16c), and **ADR-0024, outbound payload
-attestation** (Phase 16d — documents only; the chat path is unchanged).
+attestation** (Phases 16d–16e — now on **both** routes).
 
 Eleven routes are live: `/v1/chat`, `/v1/detect`, `/v1/sessions/{session_id}`,
 `/v1/documents` (POST), `/v1/documents/{id}` (GET, DELETE),
@@ -65,6 +65,7 @@ Where the two disagree, trust the test suite.
 | 16b | Document detection and labeled spans | 9/9 | ✅ Complete; reached only through 16c |
 | 16c | Document protection | 7/7 | ✅ Complete; reached through 16d |
 | 16d | Outbound attestation and the document route | 7/7 | ✅ Complete; the document path now runs end to end |
+| 16e | Shared outbound boundary and instruction protection | 6/6 | ✅ Complete; ADR-0024 satisfied on both routes |
 | 17 | Test strategy | mixed | ⚠️ See §4 |
 | 18 | Performance tests | 0/6 | ❌ Not started |
 | 24 | Manual security verification | 0/16 | ❌ Not started |
@@ -96,7 +97,8 @@ nothing has been benchmarked and the system has never run under concurrency.
 | `app/documents/` | 238 + 35 integration | Chunked AES-256-GCM with per-document HKDF keys, boundary validation, streaming multipart upload to S3-compatible storage, tenant- and user-scoped metadata, encrypted filenames |
 | `app/documents/extraction/`, `segmentation.py`, `processing.py` | 141 | TXT/PDF/DOCX extraction in a spawned, bounded, killable subprocess; zip-bomb and encrypted-PDF guards; one text buffer with page-range offsets; whitespace-aware segmentation with overlap; nothing persisted |
 | `app/documents/analysis/` | 154 | Bounded per-segment detection, global offset promotion, identity coalescing, confidence-then-overlap resolution, policy actions, and a checkpoint type that cannot hold an overlapping or blocked span. 100% covered |
-| `app/documents/outbound.py`, `pipeline.py` | 30 | Canonical payload serialization, the pre-transmission scan that discards its own tokens before judging, stage order, and the attestation written on both the sent and the refused path |
+| `app/outbound/` | 46 | The one door to a provider. Canonical serialization, the pre-transmission scan that discards its own tokens *and* scans message by message, the keyed attestation, and the injectable invoker that lets the chat path keep its deadline without getting a second copy of the check |
+| `app/documents/pipeline.py` | 16 | Document stage order, refusals, and the audit row |
 | `app/documents/protection.py` | 27 | The labeled spans applied through the *prompt* tokenizer — one splice and one batched mint in the system, not two — plus the policy, budget, and session substitutions that make the reuse safe, and a guard that refuses a result acting on a different span count |
 | `tests/privacy/` | 52 | Canary regression suite, default-policy thresholds, and the document canary sweep over logs, SQL, metrics, responses, and object keys |
 | `tests/security/` | 58 | Document cryptographic isolation matrix (one test per AAD field) and authorization isolation at both the query and ciphertext layers |
@@ -280,19 +282,16 @@ Read these before trusting a checkmark.
   `Settings` and nothing reads it. It was optional in the plan; the setting
   existing without an implementation is the misleading part, and it is called
   out in `docs/observability.md` §5 for that reason.
-- **The audit correlation HMACs are populated on the document path only.** The
-  document pipeline writes `session_id_hash`, `response_hmac`, and the new
-  `outbound_hmac`; `SecurePipeline` still writes none of them, so a chat row has
-  null digests. `prompt_hmac` is null everywhere. ADR-0024 asks for those to be
-  populated or removed, and half of that is now done.
-- **The chat path has no outbound scan and no attestation.** Everything Phase
-  16d added applies to `POST /v1/documents/{id}/process` and nothing else. A
-  prompt still reaches a provider without a pre-transmission check, which is the
-  same gap ADR-0024 was written about — now visibly asymmetric rather than
-  uniformly absent.
-- **A document instruction is not tokenized.** It is the caller's own text about
-  their own document and is sent as written; only the outbound scan stands
-  behind it.
+- **The outbound scan is per message, not over the concatenation.** Presidio's
+  NER is context-sensitive, and scanning the join reports entities that exist
+  only at the seam — `"An unremarkable week, clinically."` yields nothing alone
+  and `DATE_TIME` at 0.85 once a sentence precedes it. Per-message scanning
+  matches how protection ran. An entity genuinely spanning two messages goes
+  unreported; the claim that no real value does is a judgement, not a proof.
+- **Instruction protection costs a second vault batch.** The document and the
+  instruction are two `transform` calls under one session. ADR-0022 forbids a
+  round trip per *token*, not per message, so this is inside the rule — but it
+  is two round trips where one would do.
 - **Two metrics deviate from the architecture's label specification.** `model`
   is not a provider label and `entity_type` is not a vault label, because at
   the point of recording both strings are caller-supplied and neither module
@@ -312,8 +311,8 @@ PYTHONPATH=. ./.venv/Scripts/python.exe scripts/demo_pipeline.py
 # Full suite
 ./.venv/Scripts/python.exe -m pytest tests -q
 
-# The whole document journey, against a provider that records what it saw
-./.venv/Scripts/python.exe -m pytest tests/privacy/test_document_workflow.py -q
+# Both routes end to end, against a provider that records what it saw
+make test-e2e   # or: python tasks.py test-e2e
 
 # The canary suite specifically
 ./.venv/Scripts/python.exe -m pytest tests/privacy -m privacy -v
@@ -393,10 +392,11 @@ docker compose exec minio mc cat l/sgw-documents/<key> | strings | head
    is the same mechanism pointed in a safer direction.
 3. **Close the Phase 15 gaps** — integration tests against disposable Postgres
    and Redis, and move security assertions into `tests/security/`.
-4. **Give the chat path the outbound controls the document path now has.** The
-   scan, the attestation, and the correlation digests are all wired for
-   documents and absent for prompts. ADR-0024 was written about the request path
-   in general, and the asymmetry is now the most visible gap in the system.
+4. **Measure.** Every remaining item is measurement rather than construction:
+   nothing has been benchmarked, the system has never run under concurrency, and
+   the alert thresholds in `docs/observability.md` are still reasoned rather
+   than derived. The outbound scan is now a second full detection pass on every
+   request, which makes the latency question sharper than it was.
 5. **Performance.** There is now an endpoint to measure and metrics to measure
    it with; the alert thresholds in `docs/observability.md` should be replaced
    with values this produces. Extraction and detection are benchmarked

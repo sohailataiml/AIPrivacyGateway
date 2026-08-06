@@ -347,9 +347,15 @@ an optional session id. It requires **two scopes** — `documents:read` *and*
 key holding one but not the other must not reach the operation indirectly.
 
 The instruction is sent as a **system** message, kept apart from the document
-rather than concatenated with it, and it is **not tokenized**. That is a stated
-limit rather than an oversight: an instruction quoting a patient's name reaches
-the provider as written, and the outbound scan is what stands behind it.
+rather than concatenated with it, and it is **protected**: detected, policy-
+decided, and spliced under the same tenant, session, policy snapshot, tokenizer,
+and vault as the document.
+
+That sameness is what makes a value appearing in *both* collapse onto one token
+— same fingerprint, same vault entry — so the model sees one identifier for one
+person rather than two. A blocked entity type in the instruction refuses the
+request **before** the document's vault write, so a request destined to fail
+leaves no mappings behind.
 
 ## Failure behaviour — built for storage
 
@@ -394,14 +400,11 @@ TEST_OBJECT_STORE_ENDPOINT=http://localhost:9000 \
 ## What Phase 5 does not do
 
 - **No streaming.** A document answer is returned whole (ADR-0012).
-- **The instruction is not protected.** It is the caller's own text and is sent
-  as written; only the outbound scan stands behind it.
-- **`prompt_hmac` is still null**, on this path and on the chat path.
-  ADR-0024 asks for it to be populated or removed; documents populate
-  `outbound_hmac`, `response_hmac`, and `session_id_hash`, and the prompt digest
-  remains outstanding.
-- **The chat pipeline is unchanged.** It has no outbound scan and writes no
-  attestation. Everything in this section is the document path only.
+- **The outbound scan is per message.** Presidio's NER is context-sensitive, so
+  scanning the concatenation reports entities that exist only at the seam
+  between two messages and refuses ordinary traffic. An entity genuinely formed
+  across a boundary goes unreported; no real value is.
+- **Instruction protection costs a second vault batch**, under the same session.
 - **Nothing is persisted about the request** beyond the audit row. No status, no
   answer, no span map.
 

@@ -2,7 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-04
-- **Implemented:** 2026-08-06 (documents only)
+- **Implemented:** 2026-08-06
 
 ## Context
 
@@ -80,7 +80,7 @@ being audit-worthy means there is a result.
   part of this work, or removed. A column that is always null is worse than an
   absent one.
 
-## As Built (Phase 5, documents only)
+## As Built (Phase 6)
 
 `app/documents/outbound.py`, `app/documents/pipeline.py`, and the two nullable
 columns added by `migrations/versions/0003_outbound_attestation.py`.
@@ -115,15 +115,44 @@ account number, so without that exclusion the scan would flag the very
 substitutions protection had just made, block every document, and be switched
 off within a day.
 
-**Correlation HMACs.** `session_id_hash` and `response_hmac` are populated on
-this path, as the ADR requires. `prompt_hmac` remains null everywhere and
-**`SecurePipeline` still writes neither** — the chat path is unchanged by this
-phase, so the "populated or removed" requirement is met for documents and
-outstanding for prompts. It is recorded as a gap in `PROGRESS.md` §4 rather
-than quietly considered done.
+**Both routes, one component.** `/v1/chat` and
+`POST /v1/documents/{id}/process` transmit through the *same*
+`OutboundGateway` instance, asserted on object identity through
+`build_services`. A caller cannot reach a provider adapter without passing
+through `OutboundGateway.send`, and the scan runs inside it before the adapter
+is touched — so there is no route on which the check can be forgotten.
 
-Tests: `tests/unit/test_document_outbound.py` for the serialization collision
-properties and the scan's two halves; `tests/unit/test_document_pipeline.py`
-for the blocked path still writing its evidence and for the attested bytes
-being the transmitted bytes; `tests/privacy/test_document_workflow.py` for the
-whole journey against a provider that records what it received.
+`OutboundGateway.send` accepts an optional `invoke` callable, because the chat
+pipeline wraps its provider call in a request deadline and a concurrency
+semaphore and the document path needs neither. That injects *how* the adapter is
+awaited, never *whether*: the verdict has already been decided by the time the
+callable runs.
+
+**Correlation HMACs.** `prompt_hmac`, `response_hmac`, `session_id_hash`,
+`outbound_hmac`, and `outbound_scan` are populated on **both** routes. The
+"populated or removed" requirement is met; no column is always null.
+
+They remain nullable, and stay null on one path deliberately: a request refused
+*before* serialization — an unpermitted provider, an oversized message, a
+blocked entity type — has no payload to attest, and a null column saying so is
+more honest than a digest of something that was never assembled.
+
+**One finding worth recording.** The scan runs over **each message
+separately**, not the concatenation. Presidio's NER is context-sensitive:
+`"An unremarkable week, clinically."` yields nothing alone and yields
+`DATE_TIME` on `"week"` at 0.85 once another sentence precedes it. Scanning the
+joined text therefore reports entities no protection pass could have seen —
+protection ran per message — and refuses ordinary traffic for a value that
+exists only at the seam. Per-message scanning makes the verdict mean "protection
+missed something" rather than "the concatenation reads differently". The cost is
+that an entity formed *across* a message boundary goes unreported, which is the
+right trade: no real value spans two messages, and the artifacts demonstrably
+do.
+
+Tests: `tests/unit/test_outbound.py` for the serialization collision
+properties, the scan's two halves, and per-message scanning;
+`tests/unit/test_document_pipeline.py` for the blocked path still writing its
+evidence and the attested bytes being the transmitted bytes;
+`tests/privacy/test_document_workflow.py` for the whole document journey; and
+`tests/privacy/test_outbound_conformance.py` for both routes against a provider
+that records what it received, including that they share one gateway object.

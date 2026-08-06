@@ -23,6 +23,7 @@ from uuid import UUID
 import pytest
 from pydantic import SecretStr
 
+from app.audit.correlation import CorrelationHasher
 from app.config.settings import AppEnv, Settings
 from app.detection import Detector, FakeDetector
 from app.domain.errors import (
@@ -56,6 +57,7 @@ from app.domain.models import (
     VaultWriteRequest,
 )
 from app.llm import ProviderRegistry
+from app.outbound.gateway import OutboundGateway
 from app.pipeline import (
     DetectorLike,
     OutputPipelineLike,
@@ -419,12 +421,21 @@ def build_harness(
     resolved_settings = settings if settings is not None else build_settings()
     resolved_detector = detector if detector is not None else FakeDetector()
 
+    resolved_registry = (
+        registry if registry is not None else ProviderRegistry.from_providers(provider)
+    )
     pipeline = SecurePipeline(
         policy_service=policy,
         detector=resolved_detector,
         tokenizer=Tokenizer(vault=vault, fingerprinter=Fingerprinter(FINGERPRINT_KEY)),
-        provider_registry=(
-            registry if registry is not None else ProviderRegistry.from_providers(provider)
+        provider_registry=resolved_registry,
+        # The real shared boundary, not a stub. The outbound scan is a control
+        # on this path now, and a harness that stubbed it out would let every
+        # test below pass against a pipeline that never checked anything.
+        outbound=OutboundGateway(
+            detector=resolved_detector,
+            providers=resolved_registry,
+            hasher=CorrelationHasher(key=bytes(range(32))),
         ),
         output_pipeline=output,
         audit_service=audit,

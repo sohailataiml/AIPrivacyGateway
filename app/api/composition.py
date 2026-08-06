@@ -45,6 +45,7 @@ from app.documents.service import DocumentService
 from app.documents.storage.s3 import S3CompatibleDocumentStore
 from app.llm.registry import build_default_registry
 from app.observability.logging import get_logger
+from app.outbound.gateway import OutboundGateway
 from app.pipeline.service import SecurePipeline
 from app.policy.service import PolicyService
 from app.restoration.pipeline import OutputPipeline
@@ -170,11 +171,18 @@ async def build_services(
     )
     correlation_hasher = CorrelationHasher.from_settings(settings)
     provider_registry = build_default_registry(settings)
+    # One outbound boundary for every route. The chat pipeline and the document
+    # pipeline share it, so the scan and the attestation cannot exist on one
+    # path and be missing from the other.
+    outbound = OutboundGateway(
+        detector=detector, providers=provider_registry, hasher=correlation_hasher
+    )
     pipeline = SecurePipeline(
         policy_service=policy_service,
         detector=detector,
         tokenizer=tokenizer,
         provider_registry=provider_registry,
+        outbound=outbound,
         output_pipeline=output_pipeline,
         audit_service=PipelineAuditAdapter(audit, hasher=correlation_hasher),
         settings=settings,
@@ -198,6 +206,10 @@ async def build_services(
         DocumentProtector(
             analysis=document_analyzer,
             tokenizer=tokenizer,
+            # The same warmed detector every other stage uses. A second one
+            # could be configured differently, and an instruction would then be
+            # scanned to a different standard than the document beside it.
+            detector=detector,
             max_entities=settings.max_document_entities,
         )
         if document_analyzer is not None
@@ -207,14 +219,9 @@ async def build_services(
         DocumentPipeline(
             protection=document_protector,
             policies=policy_service,
-            # The same warmed detector the chat pipeline and the analyzer use.
-            # The outbound scan must agree with the pass that produced the
-            # spans, or it would block what protection correctly handled.
-            detector=detector,
-            providers=provider_registry,
+            outbound=outbound,
             restorer=output_pipeline,
             audit=audit,
-            hasher=correlation_hasher,
         )
         if document_protector is not None
         else None

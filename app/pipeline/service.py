@@ -58,6 +58,7 @@ from app.domain.models import (
 )
 from app.llm.base import LLMProvider
 from app.llm.registry import ProviderRegistry
+from app.outbound.gateway import OutboundGateway
 from app.pipeline import metrics
 from app.pipeline.context import (
     DEFAULT_LANGUAGE,
@@ -141,6 +142,7 @@ class SecurePipeline:
         "_audit",
         "_config",
         "_detector",
+        "_outbound",
         "_output",
         "_policy",
         "_providers",
@@ -156,6 +158,7 @@ class SecurePipeline:
         detector: DetectorLike,
         tokenizer: TokenizerLike,
         provider_registry: ProviderRegistry,
+        outbound: OutboundGateway,
         output_pipeline: OutputPipelineLike,
         audit_service: AuditServiceLike,
         settings: Settings,
@@ -165,6 +168,7 @@ class SecurePipeline:
         self._detector = detector
         self._tokenizer = tokenizer
         self._providers = provider_registry
+        self._outbound = outbound
         self._output = output_pipeline
         self._audit = audit_service
         self._settings = settings
@@ -243,20 +247,30 @@ class SecurePipeline:
     ) -> _Completed:
         """Everything after the policy resolves, in order."""
         context = attempt.with_policy(snapshot)
-        # Lookup only. Constructing a ProtectedChatRequest is still the only way
-        # to reach ``complete``, so holding the adapter here calls nothing.
-        provider = self._providers.get(attempt.provider_alias)
+        # Lookup only, and only to refuse an unregistered alias before the
+        # expensive stages. The transmission itself goes through the outbound
+        # gateway below; constructing a ProtectedChatRequest is still the only
+        # way to reach ``complete``.
+        self._providers.get(attempt.provider_alias)
 
         detections = await self._detect(request, attempt, snapshot)
         self._guard_request(request, detections, snapshot)
         protected = await self._tokenize(request, context, attempt, snapshot, detections)
 
         clock = asyncio.get_running_loop()
-        started = clock.time()
-        provider_response = await self._complete(provider, protected.request, attempt)
-        provider_ms = max(int((clock.time() - started) * 1000), 0)
+        # Serialise, digest, scan, and only then transmit -- the same boundary
+        # the document path uses (ADR-0024). ``invoke`` supplies this pipeline's
+        # deadline and concurrency bound; it is not a way past the scan, which
+        # has already run by the time the callable is awaited.
+        transmission = await self._outbound.send(
+            protected.request,
+            policy=snapshot,
+            invoke=lambda adapter, outbound_request: self._complete(
+                adapter, outbound_request, attempt
+            ),
+        )
 
-        restored = await self._restore(context, snapshot, provider_response, attempt)
+        restored = await self._restore(context, snapshot, transmission.response, attempt)
         summary = protected.summary.merged_with(restored.summary)
         return _Completed(
             response=build_response(attempt, restored, summary),
@@ -265,8 +279,14 @@ class SecurePipeline:
                 summary=summary,
                 input_character_count=sum(len(message.content) for message in request.messages),
                 output_character_count=len(restored.text),
-                provider_latency_ms=provider_ms,
+                provider_latency_ms=transmission.provider_latency_ms,
                 pipeline_latency_ms=attempt.elapsed_ms(clock.time()),
+                prompt_hmac=transmission.attestation.prompt_hmac,
+                response_hmac=self._outbound.response_digest(
+                    tenant_id=attempt.tenant_id, text=restored.text
+                ),
+                outbound_hmac=transmission.attestation.payload_hmac,
+                outbound_scan=transmission.attestation.verdict,
             ),
         )
 

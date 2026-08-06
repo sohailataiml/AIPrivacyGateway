@@ -12,14 +12,11 @@ payload assembled from half-protected text is a payload that could be sent, and
 the type system is what stops that: ``DocumentProtector`` returns a
 ``ProtectedDocument`` or it raises.
 
-**Serialisation happens before the scan and before transmission**, and the same
-bytes are used for all three. If the scan ran over one rendering and the adapter
-sent another, the attestation would prove something nobody checked and the scan
-would have checked something nobody sent. There is one byte string per request
-and it is produced once.
-
-**The scan runs before the provider call.** After it, the leak has happened; a
-check that runs afterwards is a report, not a control (ADR-0008, ADR-0024).
+**Serialisation, the scan, the digest, and the transmission are not here at
+all.** They live in :class:`~app.outbound.gateway.OutboundGateway`, which
+`/v1/chat` uses too. That is deliberate: a control implemented once on one route
+is a control that can be forgotten on the other, and forgetting it is precisely
+the failure ADR-0024 was written about.
 
 **Restoration runs after the provider call and fails closed.** A vault outage on
 the way back means the caller gets nothing rather than half-restored text, which
@@ -43,20 +40,17 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 from app.audit.models import AuditRecord, counts_from_summary
-from app.documents.outbound import ScanVerdict, scan_outbound, serialize_outbound
-from app.domain.errors import PolicyViolationError, RequestTooLargeError
+from app.domain.errors import RequestTooLargeError
 from app.domain.models import ChatMessage, PrivacySummary, ProtectedChatRequest
 from app.observability.logging import get_logger
+from app.outbound.gateway import OutboundBlockedError
 
 if TYPE_CHECKING:
     from uuid import UUID
 
-    from app.audit.correlation import CorrelationHasher
-    from app.detection.base import Detector
     from app.documents.protection import ProtectedDocument
     from app.domain.models import Principal, ProviderResponse
-    from app.llm.base import LLMProvider
-    from app.llm.registry import ProviderRegistry
+    from app.outbound.gateway import Attestation, OutboundGateway
     from app.policy.models import PolicySnapshot
     from app.restoration.protocols import PolicyLike as RestorationPolicyLike
     from app.restoration.results import RestoredOutput
@@ -76,9 +70,15 @@ class DocumentProtection(Protocol):
     """The narrow slice of protection this module needs."""
 
     async def protect(
-        self, *, tenant_id: UUID, user_id: UUID, session_id: UUID, document_id: UUID
+        self,
+        *,
+        tenant_id: UUID,
+        user_id: UUID,
+        session_id: UUID,
+        document_id: UUID,
+        instruction: str = "",
     ) -> ProtectedDocument:
-        """Return provider-safe text with every mapping durably stored."""
+        """Return provider-safe text and instruction, mappings durably stored."""
         ...
 
 
@@ -153,12 +153,10 @@ class DocumentPipeline:
 
     __slots__ = (
         "_audit",
-        "_detector",
-        "_hasher",
         "_instruction_max_chars",
+        "_outbound",
         "_policies",
         "_protection",
-        "_providers",
         "_restorer",
     )
 
@@ -167,22 +165,18 @@ class DocumentPipeline:
         *,
         protection: DocumentProtection,
         policies: PolicySource,
-        detector: Detector,
-        providers: ProviderRegistry,
+        outbound: OutboundGateway,
         restorer: OutputRestorer,
         audit: AuditSink,
-        hasher: CorrelationHasher,
         instruction_max_chars: int = DEFAULT_INSTRUCTION_MAX_CHARS,
     ) -> None:
         if instruction_max_chars < 1:
             raise ValueError("instruction_max_chars must be at least 1")
         self._protection = protection
         self._policies = policies
-        self._detector = detector
-        self._providers = providers
+        self._outbound = outbound
         self._restorer = restorer
         self._audit = audit
-        self._hasher = hasher
         self._instruction_max_chars = instruction_max_chars
 
     async def run(
@@ -229,13 +223,19 @@ class DocumentPipeline:
         policy = await self._policies.resolve(
             tenant_id=principal.tenant_id, provider=provider, model=model
         )
-        adapter = self._providers.get(provider)
+        # Policy allows the alias; the registry has to have it too. Both checks
+        # are cheap and both come before the document is opened.
+        self._outbound.authorize(provider)
 
+        # One call, so the document and the instruction share a tenant, a
+        # session, a policy snapshot, a tokenizer, and a vault -- which is what
+        # makes a value appearing in both collapse onto one token.
         protected = await self._protection.protect(
             tenant_id=principal.tenant_id,
             user_id=user_id,
             session_id=session_id,
             document_id=document_id,
+            instruction=instruction,
         )
 
         request = _protected_request(
@@ -245,17 +245,11 @@ class DocumentPipeline:
             protected=protected,
             provider=provider,
             model=model,
-            instruction=instruction,
         )
 
-        # One byte string, produced once, used for the scan, the transmission,
-        # and the attestation. Three renderings would be three chances to check
-        # one thing and send another.
-        payload = serialize_outbound(request)
-        attestation = self._hasher.outbound_digest(tenant_id=principal.tenant_id, payload=payload)
-
-        scan = await scan_outbound(request, detector=self._detector, policy=policy)
-        if not scan.is_clean:
+        try:
+            transmission = await self._outbound.send(request, policy=policy)
+        except OutboundBlockedError as blocked:
             await self._attest(
                 principal=principal,
                 request_id=request_id,
@@ -264,14 +258,13 @@ class DocumentPipeline:
                 provider=provider,
                 model=model,
                 summary=protected.summary,
-                attestation=attestation,
-                verdict=scan.verdict,
-                blocked=True,
+                attestation=blocked.attestation,
+                is_blocked=True,
                 elapsed=started,
-                request_characters=len(request.messages[-1].content),
+                request_characters=len(protected.text),
             )
-            # Entity *type* names, never a value and never an offset. The
-            # caller learns the request was refused and nothing more.
+            # Entity *type* names only, and only in the error the caller never
+            # sees the context of. No value and no offset.
             logger.warning(
                 "document_outbound_blocked",
                 tenant_id=str(principal.tenant_id),
@@ -279,18 +272,12 @@ class DocumentPipeline:
                 request_id=str(request_id),
                 reason="outbound_scan_found_entities",
             )
-            raise PolicyViolationError(
-                log_context={
-                    "reason": "outbound_scan_found_entities",
-                    "entity_type": ",".join(scan.findings),
-                }
-            )
+            raise
 
-        response = await _complete(adapter, request)
         restored = await self._restorer.restore(
             tenant_id=principal.tenant_id,
             session_id=session_id,
-            response=response,
+            response=transmission.response,
             policy=policy,
         )
 
@@ -303,13 +290,13 @@ class DocumentPipeline:
             provider=provider,
             model=model,
             summary=summary,
-            attestation=attestation,
-            verdict=scan.verdict,
-            blocked=False,
+            attestation=transmission.attestation,
+            is_blocked=False,
             elapsed=started,
-            request_characters=len(request.messages[-1].content),
+            request_characters=len(protected.text),
             response_characters=len(restored.text),
             response_text=restored.text,
+            provider_latency_ms=transmission.provider_latency_ms,
         )
         logger.info(
             "document_completed",
@@ -330,7 +317,7 @@ class DocumentPipeline:
             model=restored.model,
             text=restored.text,
             privacy=summary,
-            outbound_hmac=attestation,
+            outbound_hmac=transmission.attestation.payload_hmac,
         )
 
     # -- Internals --------------------------------------------------------
@@ -344,19 +331,19 @@ class DocumentPipeline:
         provider: str,
         model: str,
         summary: PrivacySummary,
-        attestation: str,
-        verdict: ScanVerdict,
-        blocked: bool,
+        attestation: Attestation,
+        is_blocked: bool,
         elapsed: float,
         request_characters: int,
         response_characters: int = 0,
         response_text: str | None = None,
+        provider_latency_ms: int | None = None,
     ) -> None:
         """Write the audit row. Counts, digests, and codes only.
 
-        The correlation digests are populated here rather than left null.
-        ADR-0024 is explicit that a column which is always null is worse than an
-        absent one, and this is the path that has the material to fill them.
+        The correlation digests are populated rather than left null: ADR-0024
+        is explicit that a column which is always null is worse than an absent
+        one, and this is the path that has the material to fill them.
         """
         entity_counts, actions = counts_from_summary(summary)
         tenant_id = principal.tenant_id
@@ -364,9 +351,9 @@ class DocumentPipeline:
             AuditRecord(
                 tenant_id=tenant_id,
                 request_id=request_id,
-                status_code=422 if blocked else 200,
+                status_code=422 if is_blocked else 200,
                 api_key_id=principal.api_key_id,
-                session_id_hash=self._hasher.session_digest(
+                session_id_hash=self._outbound.session_digest(
                     tenant_id=tenant_id, session_id=session_id
                 ),
                 policy_id=policy.policy_id,
@@ -377,13 +364,15 @@ class DocumentPipeline:
                 output_character_count=response_characters,
                 entity_counts=entity_counts,
                 actions=actions,
-                blocked=blocked,
-                block_reason_code="outbound_scan" if blocked else None,
+                blocked=is_blocked,
+                block_reason_code="outbound_scan" if is_blocked else None,
+                provider_latency_ms=provider_latency_ms,
                 pipeline_latency_ms=int((time.perf_counter() - elapsed) * 1000),
-                outbound_hmac=attestation,
-                outbound_scan=verdict.value,
+                outbound_hmac=attestation.payload_hmac,
+                outbound_scan=attestation.verdict,
+                prompt_hmac=attestation.prompt_hmac,
                 response_hmac=(
-                    self._hasher.response_digest(tenant_id=tenant_id, text=response_text)
+                    self._outbound.response_digest(tenant_id=tenant_id, text=response_text)
                     if response_text is not None
                     else None
                 ),
@@ -402,7 +391,6 @@ def _protected_request(
     protected: ProtectedDocument,
     provider: str,
     model: str,
-    instruction: str,
 ) -> ProtectedChatRequest:
     """Assemble the provider request from an already-protected document.
 
@@ -412,12 +400,9 @@ def _protected_request(
     of the content, which is the shape of a prompt-injection foothold the
     gateway should not hand out for free.
 
-    The instruction is not tokenized. It is the caller's own text about their
-    own document, it never contains a value the gateway protected, and running
-    it through the vault would mint mappings for text nobody needs restored.
-    That is a deliberate limit, not an oversight: an instruction that quotes a
-    patient's name reaches the provider as written, and the outbound scan is
-    what catches it.
+    Both halves arrive already protected. ``DocumentProtector`` splices the
+    instruction under the same session as the document, so an original a caller
+    wrote into their instruction is a token by the time it reaches here.
     """
     return ProtectedChatRequest(
         request_id=request_id,
@@ -426,16 +411,11 @@ def _protected_request(
         provider_alias=provider,
         model_alias=model,
         messages=(
-            ChatMessage(role="system", content=instruction),
+            ChatMessage(role="system", content=protected.instruction),
             ChatMessage(role="user", content=protected.text),
         ),
         policy_version=protected.policy_version,
     )
-
-
-async def _complete(adapter: LLMProvider, request: ProtectedChatRequest) -> ProviderResponse:
-    """Call the provider, letting its own domain errors through untouched."""
-    return await adapter.complete(request)
 
 
 def _enforce_instruction_size(instruction: str, *, limit: int) -> None:

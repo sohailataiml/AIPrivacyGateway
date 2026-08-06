@@ -239,6 +239,7 @@ def protector_of(
     return DocumentProtector(
         analysis=analyzer_of(documents, policy=policy, max_entities=max_entities),
         tokenizer=Tokenizer(vault=vault),
+        detector=FakeDetector(config=DetectionConfig(), person_names=(CANARIES["person_name"],)),
         max_entities=max_entities,
     )
 
@@ -477,7 +478,10 @@ class TestAgreementWithAnalysis:
         analyzed = await analyzer.analyze(tenant_id=TENANT, user_id=USER, document_id=document_id)
 
         protected = await DocumentProtector(
-            analysis=analyzer, tokenizer=Tokenizer(vault=vault), max_entities=10_000
+            analysis=analyzer,
+            tokenizer=Tokenizer(vault=vault),
+            detector=FakeDetector(config=DetectionConfig()),
+            max_entities=10_000,
         ).protect(tenant_id=TENANT, user_id=USER, session_id=SESSION, document_id=document_id)
 
         labeled = analyzed.counts_by_action()
@@ -496,6 +500,7 @@ class TestAgreementWithAnalysis:
         protector = DocumentProtector(
             analysis=analyzer_of(documents),
             tokenizer=_DroppingTokenizer(Tokenizer(vault=vault)),
+            detector=FakeDetector(config=DetectionConfig()),
             max_entities=10_000,
         )
 
@@ -581,6 +586,7 @@ class TestRefusals:
             DocumentProtector(
                 analysis=analyzer_of(documents),
                 tokenizer=Tokenizer(vault=vault),
+                detector=FakeDetector(config=DetectionConfig()),
                 max_entities=max_entities,
             )
 
@@ -656,6 +662,7 @@ class TestNothingLeaks:
                 session_id=SESSION,
                 document_id=uuid4(),
                 text="",
+                instruction="",
                 summary=PrivacySummary(),
                 policy_version=1,
             )

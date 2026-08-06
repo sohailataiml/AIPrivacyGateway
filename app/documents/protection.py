@@ -38,6 +38,24 @@ conversation that will quote them, so the session id is a parameter rather than
 something invented here. Inventing one would mint mappings that nothing can
 resolve and that nothing but a TTL will ever clean up.
 
+**The instruction is protected too, and by the same everything.** A caller who
+writes "summarise Marguerite Okonkwo-Vasquez's referral" has put an original
+into the payload, and a gateway that protects the document while sending that
+verbatim has not protected the request. So the instruction is detected and
+spliced here rather than at the route: same tenant, same session, same policy
+snapshot, same tokenizer, same vault.
+
+That sameness buys the property that matters. A value appearing in *both* the
+document and the instruction produces the same fingerprint — tenant, session,
+entity type, normalized value — so the vault returns the same token for both,
+and the model sees one identifier for one person rather than two.
+
+**The instruction is checked for blocked types before the document is
+protected.** The tokenizer would refuse it anyway, but by then the document's
+mappings are already in the vault: a request destined to fail would leave
+records behind, which is exactly the outcome `app/pipeline/guards.py` orders its
+stages to avoid.
+
 Nothing here logs anything derived from content, and the module makes no log
 call carrying a value — same reasoning as the tokenizer: the cheapest guarantee
 that a value is never logged is having nowhere for it to go.
@@ -48,14 +66,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from app.domain.errors import ErrorCode, GatewayError
-from app.domain.models import DetectedEntity
+from app.domain.errors import ErrorCode, GatewayError, PolicyViolationError
+from app.domain.models import DetectedEntity, EntityAction
 from app.observability.logging import get_logger
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from uuid import UUID
 
+    from app.detection.base import Detector
     from app.documents.analysis.models import AnalyzedDocument
     from app.domain.models import EntityAction, PrivacySummary, TransformedText
     from app.policy.models import PolicySnapshot
@@ -163,6 +182,15 @@ class ProtectedDocument:
     session_id: UUID
     document_id: UUID
     text: str
+    instruction: str
+    """The caller's instruction, protected under the same session as the text.
+
+    Empty when none was supplied. It stays a separate field rather than being
+    folded into ``text`` because the two travel as different messages: splicing
+    a caller's instruction into the document's own turn would let it be read as
+    part of the content.
+    """
+
     summary: PrivacySummary
     policy_version: int
 
@@ -188,20 +216,43 @@ class ProtectedDocument:
 class DocumentProtector:
     """Turns a stored document into text a provider may see."""
 
-    __slots__ = ("_analysis", "_max_entities", "_tokenizer")
+    __slots__ = ("_analysis", "_detector", "_language", "_max_entities", "_tokenizer")
 
     def __init__(
         self,
         *,
         analysis: DocumentAnalysis,
         tokenizer: TextProtector,
+        detector: Detector,
         max_entities: int,
+        language: str = "en",
     ) -> None:
         if max_entities < 1:
             raise ValueError("max_entities must be at least 1")
         self._analysis = analysis
         self._tokenizer = tokenizer
+        self._detector = detector
         self._max_entities = max_entities
+        self._language = language
+
+    async def _detect_instruction(self, instruction: str) -> tuple[DetectedEntity, ...]:
+        """Detect over the caller's instruction, or nothing for an empty one.
+
+        Not narrowed to the policy's configured entity types, for the same
+        reason the document is not: the policy's protective default for an
+        unconfigured type cannot fire if no such entity is ever detected
+        (defect 7). Diagnostics are off here too.
+        """
+        if not instruction.strip():
+            return ()
+        return tuple(
+            await self._detector.detect(
+                instruction,
+                language=self._language,
+                requested_entities=None,
+                diagnostic=False,
+            )
+        )
 
     async def protect(
         self,
@@ -210,6 +261,7 @@ class DocumentProtector:
         user_id: UUID,
         session_id: UUID,
         document_id: UUID,
+        instruction: str = "",
     ) -> ProtectedDocument:
         """Analyze one document and replace every span the policy acts on.
 
@@ -220,6 +272,9 @@ class DocumentProtector:
                 here resolve only within it, so it must be the session of the
                 conversation that will quote them.
             document_id: The document to protect.
+            instruction: The caller's own text about the document. Detected and
+                protected under the same policy and session, so a value it
+                shares with the document collapses onto one token.
 
         Returns:
             A :class:`ProtectedDocument`. Its existence means every mapping the
@@ -239,6 +294,11 @@ class DocumentProtector:
             tenant_id=tenant_id, user_id=user_id, document_id=document_id
         )
 
+        # Before the document's vault write, so a request the policy will refuse
+        # leaves no mappings behind.
+        instruction_entities = await self._detect_instruction(instruction)
+        _reject_blocked_instruction(instruction_entities, policy=analyzed.policy)
+
         transformed = await self._tokenizer.transform(
             tenant_id=tenant_id,
             session_id=session_id,
@@ -250,6 +310,25 @@ class DocumentProtector:
         )
         _verify_every_span_was_acted_on(analyzed, transformed)
 
+        # A second call, same tenant and same session, so a value shared with
+        # the document resolves to the token the document already minted. Two
+        # round trips rather than one: ADR-0022 is about never paying a round
+        # trip *per token*, and these are two batches, not two hundred.
+        protected_instruction = (
+            await self._tokenizer.transform(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                text=instruction,
+                entities=instruction_entities,
+                policy=analyzed.policy,
+            )
+            if instruction_entities
+            else None
+        )
+        summary = transformed.summary
+        if protected_instruction is not None:
+            summary = summary.merged_with(protected_instruction.summary)
+
         # Identifiers, a version, and counts. The counts come from the summary,
         # which is the tokenizer's account of what it actually did rather than
         # this module's account of what it asked for.
@@ -259,18 +338,21 @@ class DocumentProtector:
             session_id=str(session_id),
             document_id=str(document_id),
             policy_version=analyzed.policy_version,
-            detected=transformed.summary.detected,
-            tokenized=transformed.summary.tokenized,
-            redacted=transformed.summary.redacted,
-            pseudonymized=transformed.summary.pseudonymized,
-            allowed=transformed.summary.allowed,
+            detected=summary.detected,
+            tokenized=summary.tokenized,
+            redacted=summary.redacted,
+            pseudonymized=summary.pseudonymized,
+            allowed=summary.allowed,
         )
         return ProtectedDocument(
             tenant_id=tenant_id,
             session_id=session_id,
             document_id=document_id,
             text=transformed.text,
-            summary=transformed.summary,
+            instruction=(
+                protected_instruction.text if protected_instruction is not None else instruction
+            ),
+            summary=summary,
             policy_version=analyzed.policy_version,
         )
 
@@ -334,3 +416,25 @@ __all__ = [
     "ProtectedDocument",
     "TextProtector",
 ]
+
+
+def _reject_blocked_instruction(
+    entities: Sequence[DetectedEntity], *, policy: PolicySnapshot
+) -> None:
+    """Refuse the request if the instruction holds a blocked entity type.
+
+    Runs before the document's vault write, so a request the policy will refuse
+    leaves no mappings behind — the same ordering rule
+    ``app/pipeline/guards.py`` applies across a chat request's messages.
+
+    The entity type is safe to record; the value it stood for is deliberately
+    absent from both the message and the log context.
+    """
+    for entity in entities:
+        if policy.action_for(entity.entity_type) is EntityAction.BLOCK:
+            raise PolicyViolationError(
+                log_context={
+                    "entity_type": entity.entity_type,
+                    "reason": "policy_blocked_instruction_entity",
+                }
+            )
