@@ -962,6 +962,52 @@ so a document destined to fail reaches no vault call.
 
 ---
 
+## 9.15 Outbound Attestation and the Document Route
+
+The last four stages, and the first place in this system where a privacy claim
+produces evidence rather than resting on a test (ADR-0024).
+
+| Module | Responsibility |
+|---|---|
+| `app/documents/outbound.py` | Canonical serialization and the pre-transmission scan |
+| `app/documents/pipeline.py` | `DocumentPipeline` — stage order, refusals, and the audit row |
+| `app/api/v1/documents.py` | `POST /v1/documents/{id}/process` |
+
+### Order
+
+`protect → serialize → scan → transmit → restore → attest`. Serialization
+produces **one** byte string, used for all three of the scan, the transmission,
+and the attestation; three renderings would be three chances to check one thing
+and send another. The scan runs before the provider call, because afterwards a
+check is a report rather than a control.
+
+### Serialization
+
+Framing version, provider alias, model alias, policy version, and each message's
+role and content, length-prefixed. Not the provider's wire format — that belongs
+to the adapter and changes with its SDK. The request id is outside the frame so
+identical payloads attest identically and a digest can be recomputed.
+
+### The scan
+
+Detection over the exact payload; any finding the policy would act on refuses the
+request. Detections inside a gateway token or a redaction are discarded first: a
+token's 26-character identifier reads as an account number, and without that
+exclusion the scan would flag the substitutions protection just made.
+
+### Attestation
+
+`audit_events.outbound_hmac` (keyed digest of the transmitted bytes, its own
+domain constant) and `audit_events.outbound_scan` (`clean` or `blocked`), written
+on both paths. A digest, never a payload.
+
+### The route
+
+Requires `documents:read` **and** `chat:invoke`. The instruction travels as a
+system message, separate from the document and untokenized.
+
+---
+
 ## 10. API Contract Summary
 
 ### `POST /v1/chat`
@@ -1369,6 +1415,8 @@ secure-ai-gateway/
 │   │   ├── segmentation.py
 │   │   ├── service.py
 │   │   ├── validation.py
+│   │   ├── outbound.py
+│   │   ├── pipeline.py
 │   │   ├── protection.py
 │   │   ├── analysis/
 │   │   │   ├── analyzer.py

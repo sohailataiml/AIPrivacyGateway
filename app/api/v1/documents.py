@@ -28,9 +28,9 @@ from __future__ import annotations
 import urllib.parse
 from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, File, Form, Path, Request, UploadFile, status
+from fastapi import APIRouter, Body, Depends, File, Form, Path, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -39,7 +39,7 @@ from app.auth.dependencies import require_scope
 from app.documents.models import Document, DocumentMetadata, DocumentStatus
 from app.documents.service import DocumentService
 from app.domain.errors import DocumentInvalidError, ErrorCode, GatewayError
-from app.domain.models import Principal, Scope
+from app.domain.models import ChatMessage, Principal, PrivacySummary, Scope
 from app.observability.logging import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle-free typing only
@@ -317,3 +317,124 @@ async def _stream(file: UploadFile) -> AsyncIterator[bytes]:
 def _content_disposition(filename: str) -> str:
     quoted = urllib.parse.quote(filename, safe="")
     return f"attachment; filename*=UTF-8''{quoted}"
+
+
+# ---------------------------------------------------------------------------
+# Processing
+# ---------------------------------------------------------------------------
+class ProcessDocumentRequest(BaseModel):
+    """What to do with a stored document, and where to send it.
+
+    There is no field here for a tenant, a user, a session, or a policy. Those
+    come from the verified key and from server-side configuration, which is what
+    stops a caller from addressing another principal's document or asking for a
+    policy they would prefer.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=128)
+    instruction: str = Field(min_length=1, max_length=4_000)
+    """What the caller wants done. Sent as a system message, separate from the
+    document, and **not** tokenized -- see ``app/documents/pipeline.py``."""
+
+    session_id: UUID | None = None
+    """The session the vault mappings belong to.
+
+    Optional, and a new session is minted when it is absent. Supplying one is
+    how a caller has a document's tokens resolve in the same session as the
+    conversation that will quote them.
+    """
+
+
+class ProcessDocumentResponse(BaseModel):
+    """The restored answer plus counts. Returned only to the request principal."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: UUID
+    session_id: UUID
+    document_id: UUID
+    provider: str
+    model: str
+    message: ChatMessage
+    privacy: PrivacySummary
+    outbound_attestation: str
+    """Keyed digest of the exact bytes sent upstream (ADR-0024).
+
+    A digest, never the payload. It lets a caller who retained the payload prove
+    afterwards what was transmitted, without the gateway having stored it.
+    """
+
+
+@router.post(
+    "/documents/{document_id}/process",
+    response_model=ProcessDocumentResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Send a stored document through the privacy pipeline to a model",
+    response_description="The restored answer plus a privacy summary of counts only.",
+    responses=DOCUMENT_ERROR_RESPONSES,
+)
+async def process_document(
+    http_request: Request,
+    payload: Annotated[ProcessDocumentRequest, Body()],
+    principal: Annotated[Principal, Depends(require_scope(Scope.DOCUMENTS_READ))],
+    _chat: Annotated[Principal, Depends(require_scope(Scope.CHAT_INVOKE))],
+    document_id: Annotated[UUID, Path(description="Identifier returned by the upload route.")],
+) -> ProcessDocumentResponse:
+    """Decrypt, extract, detect, protect, send, and restore, in that order.
+
+    **Two scopes, both required.** Processing reads a document *and* invokes a
+    model, so it needs `documents:read` and `chat:invoke`. A key that may read
+    documents but not call a provider cannot use this route to do so
+    indirectly, and neither can one holding the reverse.
+
+    The provider never sees an original: every span the policy acts on is
+    replaced before serialisation, and a scan runs over the exact bytes to be
+    sent. A finding there refuses the request rather than warning about it.
+    """
+    services: Services = http_request.app.state.services
+    if services.document_pipeline is None:  # pragma: no cover - route absent then
+        raise GatewayError(
+            code=ErrorCode.INTERNAL_ERROR,
+            log_context={"reason": "document_pipeline_not_configured"},
+        )
+
+    answer = await services.document_pipeline.run(
+        principal=principal,
+        request_id=_request_id(http_request),
+        session_id=payload.session_id or uuid4(),
+        user_id=_user_id(principal),
+        document_id=document_id,
+        provider=payload.provider,
+        model=payload.model,
+        instruction=payload.instruction,
+    )
+    return ProcessDocumentResponse(
+        request_id=answer.request_id,
+        session_id=answer.session_id,
+        document_id=answer.document_id,
+        provider=answer.provider,
+        model=answer.model,
+        message=ChatMessage(role="assistant", content=answer.text),
+        privacy=answer.privacy,
+        outbound_attestation=answer.outbound_hmac,
+    )
+
+
+def _request_id(http_request: Request) -> UUID:
+    """The correlation id the middleware already assigned, or a fresh one.
+
+    Reusing the middleware's id means the audit row, the log lines, and the
+    ``X-Request-ID`` header a caller sees all name the same request.
+    """
+    existing = getattr(http_request.state, "request_id", None)
+    if isinstance(existing, UUID):
+        return existing
+    if isinstance(existing, str):
+        try:
+            return UUID(existing)
+        except ValueError:
+            return uuid4()
+    return uuid4()

@@ -54,6 +54,8 @@ class AuditEventDraft:
     error_code: str | None = None
     prompt_hmac: str | None = None
     response_hmac: str | None = None
+    outbound_hmac: str | None = None
+    outbound_scan: str | None = None
 
 
 class AuditEventRepository(Protocol):
@@ -112,6 +114,8 @@ class SqlAlchemyAuditEventRepository:
             error_code=draft.error_code,
             prompt_hmac=draft.prompt_hmac,
             response_hmac=draft.response_hmac,
+            outbound_hmac=draft.outbound_hmac,
+            outbound_scan=draft.outbound_scan,
         )
         self._session.add(event)
         await self._session.flush()

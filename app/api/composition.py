@@ -36,6 +36,7 @@ from app.detection.engine import PresidioDetector
 from app.documents.analysis.analyzer import DocumentAnalyzer
 from app.documents.crypto import DocumentCipher
 from app.documents.extraction.runner import SubprocessExtractionRunner
+from app.documents.pipeline import DocumentPipeline
 from app.documents.processing import DocumentProcessor
 from app.documents.protection import DocumentProtector
 from app.documents.protocol import DocumentStore
@@ -95,9 +96,17 @@ class Services:
     document_protector: DocumentProtector | None
     """Tokenization over documents. Present exactly when ``documents`` is.
 
-    Nothing calls it yet -- no route reaches document protection until the phase
-    that sends one to a provider. It shares the pipeline's tokenizer, so it
-    shares the vault, the fingerprint pepper, and the token grammar.
+    Reached through ``document_pipeline``. It shares the chat pipeline's
+    tokenizer, so it shares the vault, the fingerprint pepper, and the token
+    grammar -- which is what lets a document's tokens be restored by the same
+    machinery that restores a prompt's.
+    """
+
+    document_pipeline: DocumentPipeline | None
+    """The document request end to end. Present exactly when ``documents`` is.
+
+    Reached by ``POST /v1/documents/{id}/process``. It owns no handle of its
+    own; everything it uses is closed on its own line below.
     """
 
     def session_scope(self) -> AbstractAsyncContextManager[AsyncSession]:
@@ -159,13 +168,15 @@ async def build_services(
         AuditSinkAdapter(scope),
         fail_closed=settings.audit_fail_closed,
     )
+    correlation_hasher = CorrelationHasher.from_settings(settings)
+    provider_registry = build_default_registry(settings)
     pipeline = SecurePipeline(
         policy_service=policy_service,
         detector=detector,
         tokenizer=tokenizer,
-        provider_registry=build_default_registry(settings),
+        provider_registry=provider_registry,
         output_pipeline=output_pipeline,
-        audit_service=PipelineAuditAdapter(audit, hasher=CorrelationHasher.from_settings(settings)),
+        audit_service=PipelineAuditAdapter(audit, hasher=correlation_hasher),
         settings=settings,
     )
 
@@ -192,6 +203,22 @@ async def build_services(
         if document_analyzer is not None
         else None
     )
+    document_pipeline = (
+        DocumentPipeline(
+            protection=document_protector,
+            policies=policy_service,
+            # The same warmed detector the chat pipeline and the analyzer use.
+            # The outbound scan must agree with the pass that produced the
+            # spans, or it would block what protection correctly handled.
+            detector=detector,
+            providers=provider_registry,
+            restorer=output_pipeline,
+            audit=audit,
+            hasher=correlation_hasher,
+        )
+        if document_protector is not None
+        else None
+    )
 
     return Services(
         settings=settings,
@@ -207,6 +234,7 @@ async def build_services(
         document_processor=document_processor,
         document_analyzer=document_analyzer,
         document_protector=document_protector,
+        document_pipeline=document_pipeline,
     )
 
 

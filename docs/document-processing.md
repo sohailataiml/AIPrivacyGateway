@@ -2,31 +2,25 @@
 
 Extends the prompt pipeline to uploaded files.
 
-**Phase 1 (secure storage), Phase 2 (extraction and segmentation), Phase 3
-(detection and labeled spans), and Phase 4 (protection) are built.** Everything
-from the outbound scan onward is still specification for documents. This
-document marks the boundary explicitly at each step, because the most useful thing a design document can tell a reader
+**The document pipeline is built end to end.** Storage, extraction,
+segmentation, detection, protection, the outbound scan, transmission,
+restoration, and the audit attestation all run, and
+`POST /v1/documents/{id}/process` reaches them. This document marks what each
+stage does and what it still does not, because the most useful thing a design document can tell a reader
 is which half of it is true today.
 
 ## Pipeline
 
 ```text
-Upload → Validate → Encrypt and store → Extract → Segment → Detect → Protect │ Outbound scan
-                                                          → Batch vault write │ → LLM
-        ───────────────────────────── built ───────────────────────────────── ┤ → Restore
-                                                                              └── specified ──
+Upload → Validate → Encrypt and store → Extract → Segment → Detect → Protect
+      → Batch vault write → Serialize → Outbound scan → LLM → Restore → Attest
+      ──────────────────────────────── all built ────────────────────────────
 ```
 
-What document processing adds is everything before the outbound scan: storage,
-extraction, segmentation, the merge that turns per-segment detections back into
-one set of document spans, and the splice that replaces them. The stages after
-are the existing prompt pipeline.
-
-**Nothing calls protection yet.** `DocumentProtector` is assembled in the
-composition root, but no route reaches it and no other module invokes it. It
-becomes reachable in the phase that sends a document to a provider. Phase 4
-added **no routes, no migration, and no new `DocumentStatus` member** — for the
-same reason Phases 2 and 3 added none (ADR-0032).
+Phase 5 added **one route, one migration, and still no new `DocumentStatus`
+member** — nothing about a request outlives it, so there is still nothing for a
+status to describe (ADR-0032). The migration adds two nullable audit columns and
+touches no document table.
 
 ## Storage — built
 
@@ -301,6 +295,62 @@ vault, which is where restoration reads them.
 A blocked entity type is refused by *analysis*, before protection begins, so a
 document destined to fail reaches no vault call and leaves no TTL to wait out.
 
+## Outbound, transmission, and restoration — built
+
+The last four stages, in the order the guarantees require. Moving any of them
+breaks something specific, so the order *is* the design:
+
+| Stage | Why it is here and not later |
+|---|---|
+| Serialize | One canonical byte string per request, produced **once** and used for the scan, the transmission, and the attestation. Three renderings would be three chances to check one thing and send another |
+| Outbound scan | Before the provider call. Afterwards the leak has happened, and a check that runs then is a report rather than a control (ADR-0008) |
+| Transmit | Only a payload that passed the scan reaches an adapter |
+| Restore | After the answer returns, failing closed — half-restored text is indistinguishable from a successful answer with fewer entities |
+| Attest | On **every** path that reached serialization, including the blocked one. A row proving the check ran and refused is the evidence the mechanism exists to produce (ADR-0024) |
+
+### The serialization
+
+Framing version, provider alias, model alias, policy version, and each message's
+role and content, every field length-prefixed so no regrouping of the same bytes
+can collide. Deliberately **not** the provider's wire format: an OpenAI JSON body
+belongs to that adapter and would change with its SDK, so attesting it would tie
+the audit trail to a vendor.
+
+The request id is deliberately **outside** the frame. Two identical payloads must
+attest identically, or the digest cannot be recomputed — and a digest nobody can
+recompute proves nothing.
+
+### The scan
+
+Runs the detector over the exact payload and blocks on any detection the policy
+would act on. A type the policy *allows* is not a finding: allowing a type means
+the payload is permitted to carry it.
+
+**Detections inside a token or a redaction are discarded first.** A token's
+26-character identifier is exactly the shape of an account number, so without
+that exclusion the scan would flag the substitutions protection had just made,
+refuse every document, and be switched off within a day.
+
+### The attestation
+
+`audit_events.outbound_hmac` holds a keyed digest of the transmitted bytes and
+`outbound_scan` holds the verdict. A digest, never a payload — ADR-0013 keeps
+raw content out of durable storage and ADR-0015 requires the keyed construction.
+The column is not called `payload_hmac` because `AuditRecord` screens field names
+against a prohibited-substring list that includes `payload`.
+
+### The route
+
+`POST /v1/documents/{id}/process` takes a provider, a model, an instruction, and
+an optional session id. It requires **two scopes** — `documents:read` *and*
+`chat:invoke` — because processing reads a document and invokes a model, and a
+key holding one but not the other must not reach the operation indirectly.
+
+The instruction is sent as a **system** message, kept apart from the document
+rather than concatenated with it, and it is **not tokenized**. That is a stated
+limit rather than an oversight: an instruction quoting a patient's name reaches
+the provider as written, and the outbound scan is what stands behind it.
+
 ## Failure behaviour — built for storage
 
 Every stage fails closed (ADR-0008). An upload that cannot be encrypted or
@@ -341,12 +391,19 @@ TEST_OBJECT_STORE_ENDPOINT=http://localhost:9000 \
     pytest tests/integration/test_documents_minio.py -m integration
 ```
 
-## What Phase 4 does not do
+## What Phase 5 does not do
 
-No outbound scan, provider call, restoration, or audit for documents. No route
-reaches protection, no `DocumentStatus` member was added, and no migration was
-written. `DocumentProtector` is composed by the composition root and is invoked
-by nothing.
+- **No streaming.** A document answer is returned whole (ADR-0012).
+- **The instruction is not protected.** It is the caller's own text and is sent
+  as written; only the outbound scan stands behind it.
+- **`prompt_hmac` is still null**, on this path and on the chat path.
+  ADR-0024 asks for it to be populated or removed; documents populate
+  `outbound_hmac`, `response_hmac`, and `session_id_hash`, and the prompt digest
+  remains outstanding.
+- **The chat pipeline is unchanged.** It has no outbound scan and writes no
+  attestation. Everything in this section is the document path only.
+- **Nothing is persisted about the request** beyond the audit row. No status, no
+  answer, no span map.
 
 Two limits worth stating rather than discovering:
 

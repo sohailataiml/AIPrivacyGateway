@@ -1030,6 +1030,38 @@ resolving a document's token through the chat path's vault.
 
 ---
 
+## 20d. Phase 15e — Outbound Attestation and the Document Route
+
+The document journey end to end, and the first implementation of ADR-0024. See
+also ADR-0013, ADR-0015, and `docs/document-processing.md`.
+
+### Tasks
+
+- [x] Canonical outbound serialization: framing version, aliases, policy
+      version, and each message length-prefixed. Not the provider's wire format.
+- [x] Runtime privacy scan over the exact payload, discarding detections inside
+      a token or a redaction, refusing on anything the policy would act on.
+- [x] `DocumentPipeline` — protect, serialize, scan, transmit, restore, attest —
+      with one byte string used for the scan, the transmission, and the digest.
+- [x] `CorrelationHasher.outbound_digest` under its own domain constant.
+- [x] `audit_events.outbound_hmac` and `outbound_scan`, written on the success
+      **and** the blocked path, with migration `0003` both directions.
+- [x] `POST /v1/documents/{id}/process`, requiring `documents:read` *and*
+      `chat:invoke`.
+- [x] End-to-end fixture workflow: upload a canary document, process it against
+      a provider that records what it received, and assert the provider saw no
+      original while the caller got them back.
+
+**One route and one migration.** Still no new `DocumentStatus` member: nothing
+about a request outlives it.
+
+**Verified 2026-08-06.** The migration runs both directions against PostgreSQL.
+The central assertion is `test_the_provider_never_sees_an_original`, which is
+only possible because the mock adapter is wrapped in something that remembers
+its input.
+
+---
+
 
 ## 17. Phase 16 — Frontend Bootstrap
 

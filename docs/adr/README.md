@@ -100,7 +100,7 @@ describe.
 
 ### ADRs with an "As Built" section
 
-Most ADRs here record a decision that has not yet been implemented. Eight record
+Most ADRs here record a decision that has not yet been implemented. Nine record
 decisions that have been, and carry an **As Built** section describing the
 shipped reality — the wire format, the derivation, the AAD fields, the isolation
 mechanism — and explicitly what the phase did *not* build:
@@ -113,6 +113,7 @@ mechanism — and explicitly what the phase did *not* build:
 - [0031](0031-merge-document-detections-on-global-offsets.md) — span merging
 - [0032](0032-readiness-is-a-type-not-a-status.md) — the protection checkpoint
 - [0033](0033-protect-documents-with-the-prompt-tokenizer.md) — document protection
+- [0024](0024-outbound-payload-attestation.md) — outbound attestation, documents only
 
 Where an ADR has an As Built section, that section is the one to check code
 against. The Decision above it says what was agreed; the As Built section says

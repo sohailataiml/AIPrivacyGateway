@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-04
+- **Implemented:** 2026-08-06 (documents only)
 
 ## Context
 
@@ -78,3 +79,51 @@ being audit-worthy means there is a result.
 - The audit record's existing null-by-default correlation HMACs are populated as
   part of this work, or removed. A column that is always null is worse than an
   absent one.
+
+## As Built (Phase 5, documents only)
+
+`app/documents/outbound.py`, `app/documents/pipeline.py`, and the two nullable
+columns added by `migrations/versions/0003_outbound_attestation.py`.
+
+**What is attested.** `serialize_outbound` produces one canonical byte string
+per protected request: framing version, provider alias, model alias, policy
+version, and every message's role and content, each length-prefixed so no
+regrouping of the same bytes can collide. It is deliberately **not** the
+provider's wire format — an OpenAI JSON body belongs to that adapter and would
+change with its SDK, so attesting it would tie the audit trail to a vendor and
+let an adapter upgrade silently invalidate every old digest.
+
+The request id is deliberately **outside** the frame. Two identical payloads
+must attest identically or the digest cannot be recomputed, and a digest nobody
+can recompute proves nothing.
+
+**Where the digest goes.** `audit_events.outbound_hmac`, under its own domain
+constant in `CorrelationHasher` so an outbound attestation can never equal the
+prompt digest of the same content. The column is not called `payload_hmac`:
+`AuditRecord` screens field names against a prohibited-substring list that
+includes `payload`, and the screen is right to.
+
+**The validator that makes the result audit-worthy.** `scan_outbound` runs the
+detector over the exact payload immediately before transmission and blocks on
+any detection the policy would act on. `audit_events.outbound_scan` records
+`clean` or `blocked`, on both paths.
+
+One implementation detail is load-bearing and non-obvious: **detections falling
+inside a gateway token or a redaction placeholder are discarded before the
+verdict.** A token carries a 26-character identifier that recognizers read as an
+account number, so without that exclusion the scan would flag the very
+substitutions protection had just made, block every document, and be switched
+off within a day.
+
+**Correlation HMACs.** `session_id_hash` and `response_hmac` are populated on
+this path, as the ADR requires. `prompt_hmac` remains null everywhere and
+**`SecurePipeline` still writes neither** — the chat path is unchanged by this
+phase, so the "populated or removed" requirement is met for documents and
+outstanding for prompts. It is recorded as a gap in `PROGRESS.md` §4 rather
+than quietly considered done.
+
+Tests: `tests/unit/test_document_outbound.py` for the serialization collision
+properties and the scan's two halves; `tests/unit/test_document_pipeline.py`
+for the blocked path still writing its evidence and for the attested bytes
+being the transmitted bytes; `tests/privacy/test_document_workflow.py` for the
+whole journey against a provider that records what it received.

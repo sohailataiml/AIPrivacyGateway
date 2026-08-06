@@ -333,6 +333,8 @@ class AuditEvent(Base):
     provider_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pipeline_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    outbound_hmac: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    outbound_scan: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prompt_hmac: Mapped[str | None] = mapped_column(Text, nullable=True)
     response_hmac: Mapped[str | None] = mapped_column(Text, nullable=True)

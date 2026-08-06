@@ -3,8 +3,8 @@
 Status of the Secure AI Gateway against the phase plan in
 [implementation.md](implementation.md).
 
-**As of 2026-08-05** — 118 modules under `app/` · **1,610 tests passing, none
-skipped** (1,413 unit · 63 privacy · 85 security · 49 integration) · **96%
+**As of 2026-08-06** — 120 modules under `app/` · **1,657 tests passing, none
+skipped** (1,446 unit · 77 privacy · 85 security · 49 integration) · **96%
 coverage** (target 90%) · `mypy --strict` clean · ruff clean.
 
 That count is the whole tree in **one session** against live PostgreSQL, Redis,
@@ -12,15 +12,17 @@ and MinIO. Run suite by suite it is 48 tests smaller and every one of those is a
 silent skip — which is how defects 17 and 18 stayed invisible.
 
 Fourteen ADRs (0020–0033) and eight supporting documents are in the repository.
-Seven have shipped: **ADR-0022, batch vault operations** (§8),
+Eight have shipped: **ADR-0022, batch vault operations** (§8),
 **ADR-0020/0021, encrypted document storage** (Phase 15),
 **ADR-0028/0029/0030, document extraction and segmentation** (Phase 16),
-**ADR-0031/0032, document detection and labeled spans** (Phase 16b), and
-**ADR-0033, document protection** (Phase 16c).
+**ADR-0031/0032, document detection and labeled spans** (Phase 16b),
+**ADR-0033, document protection** (Phase 16c), and **ADR-0024, outbound payload
+attestation** (Phase 16d — documents only; the chat path is unchanged).
 
-Ten routes are live: `/v1/chat`, `/v1/detect`, `/v1/sessions/{session_id}`,
+Eleven routes are live: `/v1/chat`, `/v1/detect`, `/v1/sessions/{session_id}`,
 `/v1/documents` (POST), `/v1/documents/{id}` (GET, DELETE),
-`/v1/documents/{id}/status`, `/health/live`, `/health/ready`, `/metrics`.
+`/v1/documents/{id}/status`, `/v1/documents/{id}/process`, `/health/live`,
+`/health/ready`, `/metrics`.
 
 **The stack has been run twice.** The first run — `docker compose up --build`
 from an empty volume, migrations, seed, real requests, Prometheus scraping —
@@ -61,17 +63,17 @@ Where the two disagree, trust the test suite.
 | 15 | Secure document storage | 13/15 | ✅ Storage complete; no retention or rotation tooling |
 | 16 | Document extraction and segmentation | 11/11 | ✅ Complete; reached only through 16b |
 | 16b | Document detection and labeled spans | 9/9 | ✅ Complete; reached only through 16c |
-| 16c | Document protection | 7/7 | ✅ Complete; composed but not yet invoked |
+| 16c | Document protection | 7/7 | ✅ Complete; reached through 16d |
+| 16d | Outbound attestation and the document route | 7/7 | ✅ Complete; the document path now runs end to end |
 | 17 | Test strategy | mixed | ⚠️ See §4 |
 | 18 | Performance tests | 0/6 | ❌ Not started |
 | 24 | Manual security verification | 0/16 | ❌ Not started |
 
-**17 of 20 backend phases are done.** The service answers requests, exports
-metrics, stores documents encrypted end to end, and takes a stored document all
-the way to provider-safe text with its originals sealed in the vault. What
-remains for documents is the route that sends one and the restoration of the
-answer; what remains overall is measurement, because nothing has been
-benchmarked and the system has never run under concurrency.
+**18 of 21 backend phases are done.** A caller can now upload a clinical
+document, ask a model about it, and get an answer with the originals restored —
+while the provider sees only tokens and the audit table holds a keyed
+attestation of the exact bytes that were sent. What remains is measurement:
+nothing has been benchmarked and the system has never run under concurrency.
 
 ---
 
@@ -94,6 +96,7 @@ benchmarked and the system has never run under concurrency.
 | `app/documents/` | 238 + 35 integration | Chunked AES-256-GCM with per-document HKDF keys, boundary validation, streaming multipart upload to S3-compatible storage, tenant- and user-scoped metadata, encrypted filenames |
 | `app/documents/extraction/`, `segmentation.py`, `processing.py` | 141 | TXT/PDF/DOCX extraction in a spawned, bounded, killable subprocess; zip-bomb and encrypted-PDF guards; one text buffer with page-range offsets; whitespace-aware segmentation with overlap; nothing persisted |
 | `app/documents/analysis/` | 154 | Bounded per-segment detection, global offset promotion, identity coalescing, confidence-then-overlap resolution, policy actions, and a checkpoint type that cannot hold an overlapping or blocked span. 100% covered |
+| `app/documents/outbound.py`, `pipeline.py` | 30 | Canonical payload serialization, the pre-transmission scan that discards its own tokens before judging, stage order, and the attestation written on both the sent and the refused path |
 | `app/documents/protection.py` | 27 | The labeled spans applied through the *prompt* tokenizer — one splice and one batched mint in the system, not two — plus the policy, budget, and session substitutions that make the reuse safe, and a guard that refuses a result acting on a different span count |
 | `tests/privacy/` | 52 | Canary regression suite, default-policy thresholds, and the document canary sweep over logs, SQL, metrics, responses, and object keys |
 | `tests/security/` | 58 | Document cryptographic isolation matrix (one test per AAD field) and authorization isolation at both the query and ciphertext layers |
@@ -277,9 +280,19 @@ Read these before trusting a checkmark.
   `Settings` and nothing reads it. It was optional in the plan; the setting
   existing without an implementation is the misleading part, and it is called
   out in `docs/observability.md` §5 for that reason.
-- **The audit correlation HMACs are never populated.** `CorrelationHasher`
-  exists and is tested, but the pipeline does not write `prompt_hmac` or
-  `response_hmac`, so both are null in a live audit row.
+- **The audit correlation HMACs are populated on the document path only.** The
+  document pipeline writes `session_id_hash`, `response_hmac`, and the new
+  `outbound_hmac`; `SecurePipeline` still writes none of them, so a chat row has
+  null digests. `prompt_hmac` is null everywhere. ADR-0024 asks for those to be
+  populated or removed, and half of that is now done.
+- **The chat path has no outbound scan and no attestation.** Everything Phase
+  16d added applies to `POST /v1/documents/{id}/process` and nothing else. A
+  prompt still reaches a provider without a pre-transmission check, which is the
+  same gap ADR-0024 was written about — now visibly asymmetric rather than
+  uniformly absent.
+- **A document instruction is not tokenized.** It is the caller's own text about
+  their own document and is sent as written; only the outbound scan stands
+  behind it.
 - **Two metrics deviate from the architecture's label specification.** `model`
   is not a provider label and `entity_type` is not a vault label, because at
   the point of recording both strings are caller-supplied and neither module
@@ -298,6 +311,9 @@ PYTHONPATH=. ./.venv/Scripts/python.exe scripts/demo_pipeline.py
 
 # Full suite
 ./.venv/Scripts/python.exe -m pytest tests -q
+
+# The whole document journey, against a provider that records what it saw
+./.venv/Scripts/python.exe -m pytest tests/privacy/test_document_workflow.py -q
 
 # The canary suite specifically
 ./.venv/Scripts/python.exe -m pytest tests/privacy -m privacy -v
@@ -377,10 +393,10 @@ docker compose exec minio mc cat l/sgw-documents/<key> | strings | head
    is the same mechanism pointed in a safer direction.
 3. **Close the Phase 15 gaps** — integration tests against disposable Postgres
    and Redis, and move security assertions into `tests/security/`.
-4. **Send a protected document.** `DocumentProtector` produces provider-safe
-   text and nothing calls it. What is missing is the route, the outbound scan,
-   and restoring the answer — the last of which is where a document's tokens
-   have to survive a round trip through a model that may mangle them.
+4. **Give the chat path the outbound controls the document path now has.** The
+   scan, the attestation, and the correlation digests are all wired for
+   documents and absent for prompts. ADR-0024 was written about the request path
+   in general, and the asymmetry is now the most visible gap in the system.
 5. **Performance.** There is now an endpoint to measure and metrics to measure
    it with; the alert thresholds in `docs/observability.md` should be replaced
    with values this produces. Extraction and detection are benchmarked

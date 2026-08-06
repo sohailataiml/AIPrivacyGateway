@@ -44,6 +44,8 @@ A requirement with no status label is a requirement nobody has checked.
 | S-16 | Documents and prompts are analyzed by one configured detector, so a value protected in one is protected in the other | **Enforced** | asserted on identity through `build_services` |
 | S-17 | A token minted for a document resolves through the same vault the chat path reads | **Enforced** | asserted behaviourally, not by object identity |
 | S-18 | A document the policy blocks reaches no vault call | **Enforced** | the block is raised by detection, before protection begins |
+| S-19 | A payload is scanned for surviving originals before transmission, and a finding refuses the request | **Enforced** | ADR-0024, `tests/unit/test_document_pipeline.py::TestOutboundBlock` |
+| S-20 | Processing a document requires both `documents:read` and `chat:invoke` | **Enforced** | the route declares two scopes |
 
 ### Cryptographic requirements
 
@@ -80,6 +82,8 @@ A requirement with no status label is a requirement nobody has checked.
 | P-12 | No detected original survives into a protected document | **Enforced** | ADR-0033, `tests/unit/test_document_protection.py` |
 | P-13 | A span the policy decided on is never silently dropped before the splice | **Enforced** | the protector refuses a result that acted on a different count |
 | P-14 | A protected document carries no mappings; the originals are in the vault only | **Enforced** | `TestNothingLeaks` |
+| P-15 | No original reaches the provider on the document path | **Enforced** | `tests/privacy/test_document_workflow.py`, asserted against a provider that records what it received |
+| P-16 | The caller gets the originals back, so protection is a round trip and not a deletion | **Enforced** | same suite |
 
 ---
 
@@ -148,6 +152,8 @@ Runtime alerting: **[docs/observability.md](docs/observability.md)**.
 | O-4 | The metrics endpoint is authenticated outside local use | **Enforced** |
 | O-5 | Readiness reports each dependency individually without disclosing infrastructure | **Enforced** |
 | O-6 | Every field a module logs survives the allowlist, so a log line means what its call site says | **Enforced** — `test_no_document_log_line_loses_fields_to_the_allowlist`; this was defect 20 |
+| O-7 | Every transmitted document payload has a keyed attestation and a recorded scan verdict | **Enforced** — ADR-0024, written on the success *and* the blocked path |
+| O-8 | An attestation can be recomputed from the payload and the key | **Enforced** — the request id is outside the frame, so identical payloads attest identically |
 
 ---
 
@@ -199,34 +205,37 @@ requirements is marketing.
 5. **`user` means "API key id".** There is no user model, so per-user scoping is
    per-credential scoping. It is a real boundary, but not the one the word
    implies.
-6. **Document processing stops at protection.** No outbound scan, provider
-   call, restoration, or audit for documents. Nothing calls
-   `DocumentProtector`: it is composed by the composition root and invoked by
-   nothing until the phase that sends a document to a provider.
-7. **Extraction is header-and-structure deep, not semantic.** A PDF with a
+6. **The document path runs end to end, and the chat path does not have the
+   outbound controls.** `POST /v1/documents/{id}/process` scans, attests, and
+   audits; `POST /v1/chat` does none of those. ADR-0024's requirement is met
+   for documents and outstanding for prompts, including `prompt_hmac`, which is
+   still null everywhere.
+7. **A document instruction is not protected.** It is the caller's own text,
+   sent as written; only the outbound scan stands behind it.
+8. **Extraction is header-and-structure deep, not semantic.** A PDF with a
    well-formed object graph and meaningless content extracts successfully.
    Deciding whether a document *means* anything is not extraction's job.
-8. **A DOCX reports one page.** Pagination is a rendering decision the reader
+9. **A DOCX reports one page.** Pagination is a rendering decision the reader
    makes and is not stored in the file. Page-accurate DOCX references would
    require laying the document out.
-9. **No OCR.** A scanned PDF with no text layer is refused with
+10. **No OCR.** A scanned PDF with no text layer is refused with
    `no_extractable_text` rather than being read as images.
-10. **The segment overlap is the guarantee, and it is finite.** An entity longer
+11. **The segment overlap is the guarantee, and it is finite.** An entity longer
     than `SEGMENT_OVERLAP_CHARACTERS` can still be split across a boundary and
     seen only as fragments. The default is sized against the longest value a
     recognizer needs whole, which is a judgement, not a measurement.
-11. **A protected document is only as protected as detection was.** Every
+12. **A protected document is only as protected as detection was.** Every
     control in this phase is exact — the splice, the batching, the span-count
     guard — and all of them operate on the spans detection found. What
     detection missed is in the outbound text, and no count anywhere will say
     so. This is the same residual risk `docs/threat-model.md` names, arriving
     at the point where the text leaves.
-12. **Detection quality over documents is the same as over prompts, and
+13. **Detection quality over documents is the same as over prompts, and
     unmeasured.** `docs/threat-model.md` names detection quality as the largest
     residual risk in the system; running the same recognizers over a document
     applies the same recall to far more text. Nothing here has been evaluated
     against a labelled corpus.
-13. **A tenant cannot tighten the document entity budget.**
+14. **A tenant cannot tighten the document entity budget.**
     `MAX_DOCUMENT_ENTITIES` is a deployment setting. The policy schema has no
     per-tenant field for it, because `PolicyDocument.max_entities` is sized for
     a chat request and applying it to a document would refuse ordinary ones.
