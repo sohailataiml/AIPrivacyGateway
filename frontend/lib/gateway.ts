@@ -75,11 +75,18 @@ export class GatewayError extends Error {
   readonly requestId?: string;
 
   constructor(status: number, body: GatewayErrorBody | null, fallback: string) {
-    super(body?.error.message ?? fallback);
+    // `body?.error.message` looks equivalent and is not: optional chaining stops
+    // at `body`, so a response whose JSON parsed but has no `error` key throws a
+    // TypeError here instead of producing an error object. That is not
+    // hypothetical -- a bare 404 from the framework is `{"detail":"Not Found"}`,
+    // and the thrown TypeError surfaced to the user as a *different* refusal
+    // than the one that actually happened.
+    const detail = body?.error;
+    super(detail?.message ?? fallback);
     this.name = "GatewayError";
     this.status = status;
-    this.code = body?.error.code ?? "UNKNOWN";
-    this.requestId = body?.error.request_id;
+    this.code = detail?.code ?? `HTTP_${status}`;
+    this.requestId = detail?.request_id;
   }
 }
 

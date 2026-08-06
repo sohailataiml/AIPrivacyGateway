@@ -1,36 +1,17 @@
 /**
- * Next.js configuration, and the one place the browser-side security headers
- * from architecture.md section 22.15 are set.
+ * Next.js configuration: the security headers that do *not* vary per request.
  *
- * The CSP is deliberately strict and deliberately *not* `unsafe-inline` for
- * scripts. This application renders model output, and model output is the one
- * string on the page that an attacker upstream has influence over -- a policy
- * that permits inline script is a policy that stops mattering exactly when it
- * would have helped.
+ * The Content Security Policy is deliberately **not** here. It needs a fresh
+ * nonce on every response so Next's inline bootstrap scripts can execute under
+ * a strict `script-src`, and a static header cannot carry one. It lives in
+ * `middleware.ts`, which explains what happens when it does not.
  *
- * `connect-src` is limited to self and the gateway origin: the browser has no
- * business reaching a provider, Redis, or PostgreSQL, and stating that here
- * makes an accidental direct call fail loudly rather than work.
+ * Two CSP headers would be worse than one: browsers enforce the intersection,
+ * so a stale strict copy here would silently override the nonce policy and
+ * break hydration again.
  */
 
 /** @type {import('next').NextConfig} */
-const gatewayOrigin = process.env.NEXT_PUBLIC_GATEWAY_ORIGIN ?? "http://localhost:8000";
-
-const contentSecurityPolicy = [
-  "default-src 'self'",
-  // Next injects a small runtime; 'unsafe-inline' for *style* only, which
-  // cannot execute. Scripts get no such allowance.
-  "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data:",
-  "font-src 'self'",
-  `connect-src 'self' ${gatewayOrigin}`,
-  "frame-ancestors 'none'",
-  "object-src 'none'",
-  "base-uri 'self'",
-  "form-action 'self'",
-].join("; ");
-
 const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
@@ -39,7 +20,6 @@ const nextConfig = {
       {
         source: "/:path*",
         headers: [
-          { key: "Content-Security-Policy", value: contentSecurityPolicy },
           { key: "X-Content-Type-Options", value: "nosniff" },
           { key: "X-Frame-Options", value: "DENY" },
           { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },

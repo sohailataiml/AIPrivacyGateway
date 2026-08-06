@@ -35,6 +35,12 @@ services:
       VAULT_KEY_LOCAL1: bG9jYWwtY29tcG9zZS12YXVsdC1rZXktMzJieXRlcyE=
       AUDIT_HMAC_KEY: bG9jYWwtY29tcG9zZS1hdWRpdC1obWFjLTMyYnl0ZXMh
       DEFAULT_PROVIDER: mock
+
+      # The workspace in frontend/ runs on :3000 and calls this API from the
+      # browser. CORS is off by default and stays off in a deployment; the
+      # local origin is listed here so `docker compose up` plus `npm run dev`
+      # is a working pair without a manual step.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
       # Document storage (ADR-0020, ADR-0021, ADR-0027). The document key ring
       # is separate from the vault's on purpose: the two protect data with
       # different lifetimes and rotate on different schedules.
