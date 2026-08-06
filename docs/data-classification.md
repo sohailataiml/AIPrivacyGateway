@@ -11,6 +11,7 @@ is stored.
 | Document metadata | Internal | PostgreSQL | At rest + TLS | With the document | Allowed |
 | Object storage key | Internal | PostgreSQL / object store | None needed | With the document | Allowed |
 | Extracted text | Restricted | Prefer none | Required if retained | Minimal | Never |
+| Labeled span (offsets + type) | Confidential | Not persisted | TLS | Request lifetime | Type only, never an offset |
 | Original entity value | Restricted | Redis | App-layer AEAD | Session TTL | Never |
 | Security token | Confidential | Redis / protected payload | TLS | Session TTL | Full token prohibited |
 | Protected prompt | Confidential | Not persisted | TLS | Request lifetime | Never |
@@ -53,6 +54,16 @@ is stored.
 - **Extracted text is as sensitive as the document it came from.** It is
   plaintext originals in bulk, minus the file format. The default is not to
   retain it; temporary files are deleted immediately, including on error paths.
+- **A labeled span is not a value, and it is not Internal either.** It is an
+  entity type and a pair of offsets — no text at all. But an offset plus the
+  stored ciphertext is a *map of where a document's sensitive values are*, which
+  is worth more to an attacker who already has the bucket than the metadata row
+  next to it. Hence Confidential, not persisted, and never logged: the entity
+  type may appear in an error's log context, the offset may not. A per-type
+  count on a single document is the same problem in aggregate — "this file holds
+  two social security numbers" belongs in an access-controlled audit record, not
+  on stdout. Reading a span's text requires the buffer, so `LabeledSpan` has no
+  field a value could hide in (ADR-0032).
 - **A full security token is Confidential, not Internal.** A token is useless
   without the vault, but it is the handle to a Restricted value, so full tokens
   are never logged. Shortened forms are acceptable for display and correlation.
@@ -74,3 +85,5 @@ is stored.
 - ADR-0020 — encrypted document storage
 - ADR-0021 — user-scoped document keys
 - ADR-0025 — pseudonymization is re-identifiable
+- ADR-0030 — do not persist extracted plaintext
+- ADR-0032 — readiness is a type, not a status

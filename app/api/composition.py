@@ -33,6 +33,7 @@ from app.config.settings import Settings
 from app.db.session import build_engine_from_settings, build_session_factory
 from app.detection.config import DetectionConfig
 from app.detection.engine import PresidioDetector
+from app.documents.analysis.analyzer import DocumentAnalyzer
 from app.documents.crypto import DocumentCipher
 from app.documents.extraction.runner import SubprocessExtractionRunner
 from app.documents.processing import DocumentProcessor
@@ -78,9 +79,17 @@ class Services:
     document_processor: DocumentProcessor | None
     """Extraction and segmentation. Present exactly when ``documents`` is.
 
-    Nothing calls it yet -- no route reaches extraction until the phase that
-    adds detection over documents. It is assembled here so its worker bound and
-    its shutdown are wired once, in the one place that knows how parts fit.
+    Reached only through ``document_analyzer``. It is assembled here so its
+    worker bound and its shutdown are wired once, in the one place that knows
+    how parts fit.
+    """
+
+    document_analyzer: DocumentAnalyzer | None
+    """Detection over documents. Present exactly when ``documents`` is.
+
+    Nothing calls it yet -- no route reaches document detection until the phase
+    that protects a document. It owns no handle of its own, so it needs no
+    closer: the processor it reads through is closed on its own line below.
     """
 
     def session_scope(self) -> AbstractAsyncContextManager[AsyncSession]:
@@ -161,6 +170,11 @@ async def build_services(
     document_processor = (
         _build_document_processor(settings, documents) if documents is not None else None
     )
+    document_analyzer = (
+        _build_document_analyzer(settings, document_processor, detector, policy_service)
+        if document_processor is not None
+        else None
+    )
 
     return Services(
         settings=settings,
@@ -174,6 +188,7 @@ async def build_services(
         rate_limiter=RedisRateLimiter(redis=redis),
         documents=documents,
         document_processor=document_processor,
+        document_analyzer=document_analyzer,
     )
 
 
@@ -213,6 +228,29 @@ def _build_document_processor(settings: Settings, documents: DocumentService) ->
             overlap_characters=settings.segment_overlap_characters,
         ),
         max_document_bytes=settings.max_document_bytes,
+    )
+
+
+def _build_document_analyzer(
+    settings: Settings,
+    processor: DocumentProcessor,
+    detector: PresidioDetector,
+    policies: PolicyService,
+) -> DocumentAnalyzer:
+    """Assemble detection over documents.
+
+    Shares the one warmed ``PresidioDetector`` with the chat pipeline rather
+    than building a second. A separate instance would load spaCy again --
+    hundreds of megabytes for no benefit -- and, worse, could be configured
+    differently, so a value protected in a prompt might not be protected in a
+    document.
+    """
+    return DocumentAnalyzer(
+        source=processor,
+        detector=detector,
+        policies=policies,
+        max_entities=settings.max_document_entities,
+        concurrency=settings.document_detection_concurrency,
     )
 
 

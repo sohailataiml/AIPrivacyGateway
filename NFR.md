@@ -40,6 +40,8 @@ A requirement with no status label is a requirement nobody has checked.
 | S-12 | A parser that hangs, exhausts memory, or crashes cannot take the process with it | **Enforced** | one spawned process per document, terminated on timeout |
 | S-13 | Archive expansion is bounded before decompression | **Enforced** | DOCX ratio and entry-count guards read the ZIP directory |
 | S-14 | Third-party libraries that touch content have their log floor raised | **Enforced** | Presidio, the OpenAI SDK, and now pypdf/docx/lxml |
+| S-15 | Detection over a document reads through the same tenant- and user-scoped path as retrieval | **Enforced** | `tests/security/test_document_analysis_isolation.py` |
+| S-16 | Documents and prompts are analyzed by one configured detector, so a value protected in one is protected in the other | **Enforced** | asserted on identity through `build_services` |
 
 ### Cryptographic requirements
 
@@ -70,6 +72,9 @@ A requirement with no status label is a requirement nobody has checked.
 | P-6 | Retention is enforced automatically | **Specified** | documents persist until deleted |
 | P-7 | Extracted plaintext is never persisted, anywhere | **Enforced** | ADR-0030, `TestRetentionAndLogging` |
 | P-8 | An entity is never hidden by a segment boundary | **Enforced** | overlap + whitespace-aware cuts, property-tested |
+| P-9 | A value straddling a boundary yields exactly one span, covering it whole | **Enforced** | ADR-0031, `TestBoundaries` against the real segmenter |
+| P-10 | Span offsets and per-type counts never reach a log line | **Enforced** | `tests/privacy/test_document_analysis_canaries.py` |
+| P-11 | Detection is never narrowed to the policy's configured entity types | **Enforced** | defect 7's regression, now asserted for documents too |
 
 ---
 
@@ -89,7 +94,9 @@ Document-storage requirements that are structural rather than numeric:
 | PF-4 | Vault writes are batched, never one round trip per token | **Enforced** — ADR-0022 |
 | PF-5 | Extraction concurrency is bounded, so a burst cannot start a process per request | **Enforced** — `EXTRACTION_MAX_WORKERS`, sampled during a parallel run |
 | PF-6 | Extraction has a wall-clock deadline that actually ends the work | **Enforced** — the worker is terminated, not abandoned |
-| PF-7 | Upload throughput, extraction time, and document latency are measured | **Specified** — not measured |
+| PF-7 | Detection concurrency is bounded across documents, not per document | **Enforced** — `DOCUMENT_DETECTION_CONCURRENCY`, sampled during a parallel run |
+| PF-8 | Labeled spans per document are bounded, so one upload cannot become an unbounded vault batch | **Enforced** — `MAX_DOCUMENT_ENTITIES` |
+| PF-9 | Upload throughput, extraction time, detection time, and document latency are measured | **Specified** — not measured |
 
 **Extraction does not stream, and that is deliberate.** A PDF cross-reference
 table sits at the end of the file and points backwards, so a parser needs random
@@ -117,7 +124,8 @@ Neither has been tuned against a measurement.
 | A-7 | Deletes are idempotent | **Enforced** |
 | A-8 | Timeouts bound every outbound call | **Enforced** — a silent endpoint fails within the read timeout, not eventually |
 | A-9 | An extraction worker is reaped on every exit path, including timeout | **Enforced** — asserted against `multiprocessing.active_children()` |
-| A-10 | A file that stored cleanly may still be refused at extraction, without destroying it | **Enforced** — `TestRefusals` |
+| A-10 | A file that stored cleanly may still be refused at extraction or by policy, without destroying it | **Enforced** — `TestRefusals`, `test_a_refusal_leaves_the_stored_document_untouched` |
+| A-12 | One failing segment cancels the rest rather than letting a refused document pay for the remainder | **Enforced** — `asyncio.TaskGroup` |
 | A-11 | Behaviour under concurrency is measured | **Specified** — the system has never been load tested |
 
 ---
@@ -133,6 +141,7 @@ Runtime alerting: **[docs/observability.md](docs/observability.md)**.
 | O-3 | Metric label cardinality is bounded; no identifier or filename is ever a label | **Enforced** |
 | O-4 | The metrics endpoint is authenticated outside local use | **Enforced** |
 | O-5 | Readiness reports each dependency individually without disclosing infrastructure | **Enforced** |
+| O-6 | Every field a module logs survives the allowlist, so a log line means what its call site says | **Enforced** — `test_no_document_log_line_loses_fields_to_the_allowlist`; this was defect 20 |
 
 ---
 
@@ -184,10 +193,10 @@ requirements is marketing.
 5. **`user` means "API key id".** There is no user model, so per-user scoping is
    per-credential scoping. It is a real boundary, but not the one the word
    implies.
-6. **Document processing stops at segmentation.** No detection, tokenization,
-   vault interaction, or restoration for documents. Nothing calls
-   `DocumentProcessor`: it is composed and closed by the composition root and
-   invoked by nothing until the phase that adds detection.
+6. **Document processing stops at detection.** No tokenization, vault
+   interaction, provider call, or restoration for documents. Nothing calls
+   `DocumentAnalyzer`: it is composed by the composition root and invoked by
+   nothing until the phase that protects a document.
 7. **Extraction is header-and-structure deep, not semantic.** A PDF with a
    well-formed object graph and meaningless content extracts successfully.
    Deciding whether a document *means* anything is not extraction's job.
@@ -200,6 +209,16 @@ requirements is marketing.
     than `SEGMENT_OVERLAP_CHARACTERS` can still be split across a boundary and
     seen only as fragments. The default is sized against the longest value a
     recognizer needs whole, which is a judgement, not a measurement.
+11. **Detection quality over documents is the same as over prompts, and
+    unmeasured.** `docs/threat-model.md` names detection quality as the largest
+    residual risk in the system; running the same recognizers over a document
+    applies the same recall to far more text. Nothing here has been evaluated
+    against a labelled corpus.
+12. **A tenant cannot tighten the document entity budget.**
+    `MAX_DOCUMENT_ENTITIES` is a deployment setting. The policy schema has no
+    per-tenant field for it, because `PolicyDocument.max_entities` is sized for
+    a chat request and applying it to a document would refuse ordinary ones.
+    Adding one is a schema change and needs its own decision.
 
 ## Related documents
 

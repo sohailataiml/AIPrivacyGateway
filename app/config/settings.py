@@ -171,6 +171,26 @@ class Settings(BaseSettings):
     recognizer matches. Lowering it trades detection coverage for throughput.
     """
 
+    # -- Detection over documents (ADR-0002, ADR-0014, ADR-0031) ----------
+    document_detection_concurrency: int = Field(default=4, ge=1, le=64)
+    """Segments detected at once, across every document in flight.
+
+    Presidio analysis is CPU-bound and runs on a worker thread per call, so an
+    unbounded fan-out over a long document asks for a thread per segment and
+    starves the request path rather than finishing sooner. The bound is shared
+    by the whole process, not applied per document.
+    """
+
+    max_document_entities: int = Field(default=10_000, ge=1, le=100_000)
+    """Ceiling on labeled spans in one document.
+
+    Deliberately not ``max_entities_per_request``: 500 is generous for a prompt
+    and refuses an ordinary clinical document. This bound exists to stop one
+    upload from becoming an unbounded batch of vault writes in the phase that
+    protects it. The default matches ``MAX_POLICY_ENTITY_BUDGET``, the most a
+    policy document is permitted to ask for.
+    """
+
     @model_validator(mode="after")
     def _segments_must_be_able_to_advance(self) -> Self:
         """An overlap at or above the segment size makes segmentation stall.

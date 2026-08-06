@@ -2,29 +2,31 @@
 
 Extends the prompt pipeline to uploaded files.
 
-**Phase 1 (secure storage) and Phase 2 (extraction and segmentation) are built.**
-Everything from `Detect` onward is still specification for documents. This
-document marks the boundary explicitly at each step, because the most useful
-thing a design document can tell a reader is which half of it is true today.
+**Phase 1 (secure storage), Phase 2 (extraction and segmentation), and Phase 3
+(detection and labeled spans) are built.** Everything from `Protect` onward is
+still specification for documents. This document marks the boundary explicitly
+at each step, because the most useful thing a design document can tell a reader
+is which half of it is true today.
 
 ## Pipeline
 
 ```text
-Upload → Validate → Encrypt and store → Extract → Segment │ Detect → Protect
-                                                          │ → Batch vault write
-        ─────────────────── built ─────────────────────── ┤ → Outbound scan
-                                                          │ → LLM → Restore
-                                                          └── specified ──────
+Upload → Validate → Encrypt and store → Extract → Segment → Detect │ Protect
+                                                                   │ → Batch vault write
+        ────────────────────────── built ───────────────────────── ┤ → Outbound scan
+                                                                   │ → LLM → Restore
+                                                                   └── specified ──────
 ```
 
 The stages after `Detect` are the existing prompt pipeline. What document
-processing adds is everything before it, plus segmentation.
+processing adds is everything before it, plus segmentation and the merge that
+turns per-segment detections back into one set of document spans.
 
-**Nothing calls extraction yet.** `DocumentProcessor` is assembled in the
-composition root and closed on shutdown, but no route reaches it and no other
-module invokes it. It becomes reachable in the phase that adds detection over
-documents. Phase 2 added **no routes, no migration, and no new
-`DocumentStatus` member**.
+**Nothing calls analysis yet.** `DocumentAnalyzer` is assembled in the
+composition root, but no route reaches it and no other module invokes it. It
+becomes reachable in the phase that protects a document. Phase 3 added **no
+routes, no migration, and no new `DocumentStatus` member** — for the same
+reason Phase 2 added none, now written down as ADR-0032.
 
 ## Storage — built
 
@@ -211,6 +213,63 @@ A document that extracts to zero characters — a scanned PDF with no text layer
 is refused with `no_extractable_text` rather than yielding zero segments, which
 would look like success and send an empty prompt onward.
 
+## Detection and labeled spans — built
+
+Segmentation hands the detector overlapping windows on purpose, so the same
+value is reported more than once and a cut can manufacture a fragment that looks
+like a whole entity. Turning that back into one decision per character is the
+work of this stage, and the order of the steps is load-bearing (ADR-0031):
+
+1. **Promote** each detection to global offsets via `Segment.to_global`.
+2. **Coalesce** detections sharing an `(entity_type, start, end)` identity,
+   keeping the **highest** score and the union of the segment indexes. The
+   segment that saw the value with its context intact is the one that scored it
+   right, and the maximum can only move a span *over* a policy threshold.
+3. **Select confident** — drop spans below the policy's `min_score` for their
+   type. Dropped, not labeled `ALLOW`: the policy has decided they are not
+   detections, so they appear in no count.
+4. **Resolve overlaps** with the same severity-first rule the prompt path uses
+   (`architecture.md` §9.4). A fragment loses to the whole value it came from
+   because the rule already prefers the longer span; no special case exists.
+5. **Label** each survivor with the policy's action and the pages it touches.
+
+**Confidence is filtered before overlaps are resolved, and the reverse order
+loses values.** A sub-threshold `API_KEY` overlapping an above-threshold
+`EMAIL_ADDRESS`: severity is the first key of the ordering rule, so resolving
+first lets the api key win the span and then be dropped for confidence, leaving
+nothing protecting those characters.
+
+### What the detector is asked
+
+The full supported entity set, never narrowed to the policy's configured types.
+Narrowing recreates defect 7 — the policy's protective default for an
+unconfigured type cannot fire if no such entity is ever detected. Diagnostics
+are off and not configurable: a recognizer name is diagnostic output for a
+privileged caller inspecting one prompt, and it never travels with a document's
+spans.
+
+### Bounds and refusals
+
+| Control | Setting | Why |
+|---|---|---|
+| Segments detected at once | `DOCUMENT_DETECTION_CONCURRENCY` (4) | Presidio runs on a worker thread per call; an unbounded fan-out starves the request path. Shared across documents, not per document |
+| Labeled spans per document | `MAX_DOCUMENT_ENTITIES` (10,000) | Bounds the vault batch the protection phase will write. Not the policy's `max_entities`, which is sized for a prompt and would refuse an ordinary clinical document |
+| A blocked entity type | policy | `PolicyViolationError`. The type is recorded; the value is not |
+| A failing segment | — | Cancels the rest. `asyncio.TaskGroup`, not `gather`: a document already refused should not go on paying for detection |
+
+### Readiness (ADR-0032)
+
+The result is an `AnalyzedDocument`, and its **construction is the checkpoint**.
+It cannot hold spans that overlap, run backwards, fall outside the buffer, or
+carry `BLOCK`. So the phase that protects a document does not re-validate any of
+that — holding one means the policy has been applied and a right-to-left splice
+over its spans is safe. The same reasoning as `ProtectedChatRequest`, and the
+reason there is still no new `DocumentStatus` member: nothing is persisted, so
+there is nothing for a status to describe.
+
+Counts are derived from the spans on each call rather than stored, so a summary
+cannot disagree with what will actually be protected.
+
 ## Vault interaction — specified
 
 A document produces far more entities than a prompt does. Mapping writes are
@@ -258,12 +317,25 @@ TEST_OBJECT_STORE_ENDPOINT=http://localhost:9000 \
     pytest tests/integration/test_documents_minio.py -m integration
 ```
 
-## What Phase 2 does not do
+## What Phase 3 does not do
 
-No detection, tokenization, vault interaction, provider call, restoration, or
-audit for documents. No route reaches extraction, no `DocumentStatus` member was
-added, and no migration was written. `DocumentProcessor` is composed and closed
-by the composition root and is invoked by nothing.
+No tokenization, vault interaction, provider call, restoration, or audit for
+documents. No route reaches analysis, no `DocumentStatus` member was added, and
+no migration was written. `DocumentAnalyzer` is composed by the composition root
+and is invoked by nothing.
+
+Two limits worth stating rather than discovering:
+
+- **The document entity budget is a deployment setting, not a policy field.**
+  `PolicyDocument.max_entities` is sized for a chat request and applying it to a
+  document would refuse ordinary ones. A tenant therefore cannot tighten the
+  document budget below the deployment's until the policy schema gains a field
+  for it, which is a schema change and needs its own decision.
+- **Detection quality is unchanged and unmeasured on documents.** The recognizers
+  are the prompt path's, and `docs/threat-model.md` already names detection
+  quality as the largest residual risk in the system. Running them over a
+  document does not make them better at PHI; it makes the same recall apply to
+  far more text.
 
 ## Related decisions
 
@@ -274,4 +346,8 @@ by the composition root and is invoked by nothing.
 - ADR-0028 — spawned process isolation for extraction
 - ADR-0029 — page-range document offsets
 - ADR-0030 — do not persist extracted plaintext
+- ADR-0031 — merge document detections on global offsets
+- ADR-0032 — readiness is a type, not a status
+- ADR-0002 — Presidio as the detection engine
+- ADR-0014 — policy-driven entity actions
 - ADR-0008 — fail closed

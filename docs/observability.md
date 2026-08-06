@@ -178,6 +178,21 @@ id bound as context. The allowlist in `app/observability/logging.py` decides
 what may be emitted; message content, original values, mappings, tokens, and
 credentials are not on it.
 
+**The allowlist is deny-by-default, and that cuts both ways.** A key it does not
+recognise is dropped and reported by name in `_dropped_keys` — the value never
+reaches a handler, which is the point. It also means a call site that logs a
+field nobody added to the list produces a line with less in it than its author
+believes, and nothing raises. That is exactly what happened to the whole
+document path for two phases (PROGRESS.md defect 20): `document_stored` and
+`document_segmented` carried an event name and a tenant id and nothing else.
+
+So **adding a log field means adding it to `ALLOWED_EVENT_KEYS`**, and a module
+whose log lines matter operationally should assert they arrive — not only that
+sensitive values do not. `tests/privacy/test_document_analysis_canaries.py::
+TestLogs::test_no_document_log_line_loses_fields_to_the_allowlist` is the shape:
+run the real path with logging configured, and require no `_dropped_keys` marker
+in what comes out. Only the document path is covered that way today.
+
 Third-party debug logging is a recurring leak class and is handled explicitly:
 `presidio-analyzer` logs analyzed text at `DEBUG`, and the OpenAI SDK and httpx
 log full request bodies at `DEBUG`. Both are raised to `WARNING` at import, and

@@ -3,14 +3,19 @@
 Status of the Secure AI Gateway against the phase plan in
 [implementation.md](implementation.md).
 
-**As of 2026-08-05** — 107 modules under `app/` · **1,293 tests passing**
-(1,134 unit · 52 privacy · 58 security · 49 integration) · **96% coverage**
-(target 90%) · `mypy --strict` clean · ruff clean.
+**As of 2026-08-05** — 117 modules under `app/` · **1,582 tests passing, none
+skipped** (1,387 unit · 63 privacy · 83 security · 49 integration) · **95%
+coverage** (target 90%) · `mypy --strict` clean · ruff clean.
 
-Eleven ADRs (0020–0030) and eight supporting documents are in the repository.
-Four have shipped: **ADR-0022, batch vault operations** (§8),
-**ADR-0020/0021, encrypted document storage** (Phase 15), and
-**ADR-0028/0029/0030, document extraction and segmentation** (Phase 16).
+That count is the whole tree in **one session** against live PostgreSQL, Redis,
+and MinIO. Run suite by suite it is 48 tests smaller and every one of those is a
+silent skip — which is how defects 17 and 18 stayed invisible.
+
+Thirteen ADRs (0020–0032) and eight supporting documents are in the repository.
+Six have shipped: **ADR-0022, batch vault operations** (§8),
+**ADR-0020/0021, encrypted document storage** (Phase 15),
+**ADR-0028/0029/0030, document extraction and segmentation** (Phase 16), and
+**ADR-0031/0032, document detection and labeled spans** (Phase 16b).
 
 Ten routes are live: `/v1/chat`, `/v1/detect`, `/v1/sessions/{session_id}`,
 `/v1/documents` (POST), `/v1/documents/{id}` (GET, DELETE),
@@ -53,15 +58,18 @@ Where the two disagree, trust the test suite.
 | 13 | Observability | 5/7 | ⚠️ No OTel, no Grafana JSON |
 | 14 | Docker Compose and local ops | 11/11 | ✅ Executed end to end |
 | 15 | Secure document storage | 13/15 | ✅ Storage complete; no retention or rotation tooling |
-| 16 | Document extraction and segmentation | 11/11 | ✅ Complete; composed but not yet invoked |
+| 16 | Document extraction and segmentation | 11/11 | ✅ Complete; reached only through 16b |
+| 16b | Document detection and labeled spans | 9/9 | ✅ Complete; composed but not yet invoked |
 | 17 | Test strategy | mixed | ⚠️ See §4 |
 | 18 | Performance tests | 0/6 | ❌ Not started |
 | 24 | Manual security verification | 0/16 | ❌ Not started |
 
-**15 of 18 backend phases are done.** The service answers requests, exports
-metrics, stores documents encrypted end to end, and turns a stored document into
-detector-ready segments. What remains is measurement rather than construction:
-nothing has been benchmarked and the system has never run under concurrency.
+**16 of 19 backend phases are done.** The service answers requests, exports
+metrics, stores documents encrypted end to end, turns a stored document into
+detector-ready segments, and locates every sensitive value in one with a policy
+decision attached. What remains before a document can be sent anywhere is
+protection — tokenization and the vault — and measurement: nothing has been
+benchmarked and the system has never run under concurrency.
 
 ---
 
@@ -83,6 +91,7 @@ nothing has been benchmarked and the system has never run under concurrency.
 | `app/llm/` | 17 | Registry, OpenAI adapter (Responses API, `store=False`), retries, mock provider |
 | `app/documents/` | 238 + 35 integration | Chunked AES-256-GCM with per-document HKDF keys, boundary validation, streaming multipart upload to S3-compatible storage, tenant- and user-scoped metadata, encrypted filenames |
 | `app/documents/extraction/`, `segmentation.py`, `processing.py` | 141 | TXT/PDF/DOCX extraction in a spawned, bounded, killable subprocess; zip-bomb and encrypted-PDF guards; one text buffer with page-range offsets; whitespace-aware segmentation with overlap; nothing persisted |
+| `app/documents/analysis/` | 154 | Bounded per-segment detection, global offset promotion, identity coalescing, confidence-then-overlap resolution, policy actions, and a checkpoint type that cannot hold an overlapping or blocked span. 100% covered |
 | `tests/privacy/` | 52 | Canary regression suite, default-policy thresholds, and the document canary sweep over logs, SQL, metrics, responses, and object keys |
 | `tests/security/` | 58 | Document cryptographic isolation matrix (one test per AAD field) and authorization isolation at both the query and ciphertext layers |
 
@@ -121,6 +130,7 @@ form on first call and keeps it through any later reconfiguration, so
 `_logger` alongside it, as the first attempt did, sends structlog's proxy into
 infinite recursion on the next log call.
 | 19 | **A segment could be wholly contained in the one before it.** When the only break in the search window fell inside the previous segment, `_end_of_segment` returned an end that had already been covered. | No new characters, so no progress in the sense that matters. Coverage and ordering still held, which is why every hand-written example passed; on adversarial input — a break every few characters with an overlap near the segment size — it degenerates into a near-identical segment per character, and detection work multiplies with it. Found by Hypothesis at `text='0000000 00', max_characters=8, overlap=7`, on a run that explored examples an earlier run had not. The boundary search now rejects a candidate at or before the previous end and falls back to the hard limit, which is provably past it. |
+| 20 | **Every document log line silently lost its fields.** `drop_unlisted_keys` is deny-by-default, and `document_id`, `content_type`, `byte_size`, `page_count`, `character_count`, `segment_count` were never added to `ALLOWED_EVENT_KEYS`. | `document_stored`, `document_segmented`, and every document error carried a bare event name and a tenant id — nothing that could tie a failure to a document. The allowlist reports a dropped key by name in `_dropped_keys`, so the evidence was in every log line the whole time, in a field nobody read. **Deny-by-default is why this was an observability bug and not a leak**, and also why it survived two phases: it fails safe, silently, and by design. Found while writing the Phase 16b log line, which would have been the third one to lose its fields. Fixed by allowlisting the document keys — Internal, every one, and the filename deliberately still absent — with `test_no_document_log_line_loses_fields_to_the_allowlist` asserting no `_dropped_keys` marker survives a full upload-and-analyze. |
 
 ### Lessons worth keeping
 
@@ -172,6 +182,13 @@ infinite recursion on the next log call.
   Alembic's generated `env.py` ships that default. It is a reasonable default
   for a standalone CLI and wrong for anything running in a live process — and
   nothing warns you, because a disabled logger fails silently by definition.
+- **Deny-by-default fails safe and silently, which is two different things.**
+  Defect 20 sat through two phases because the logging allowlist did exactly
+  what it was designed to do: drop what it did not recognise, without
+  complaining. Nothing broke, no value leaked, and every document log line was
+  empty of anything an operator could use. A control that silently discards
+  correct input needs a test that the input arrives, not only a test that bad
+  input does not.
 - **Property-based tests earn their keep on the second run, not the first.**
   Defect 19 passed a full green suite and then failed the next time Hypothesis
   explored a different corner. The properties worth generating are the ones
@@ -222,13 +239,23 @@ Read these before trusting a checkmark.
 - **`user` means "API key id".** There is no user model, so per-user document
   scoping is per-credential scoping. It is a real boundary — two keys in one
   tenant cannot read each other's documents — but not the one the word implies.
-- **Documents stop at segmentation.** No detection, tokenization, vault
-  interaction, or restoration for documents. `DocumentStatus` deliberately has
-  no member the system cannot reach, which is why Phase 16 added none.
-- **`DocumentProcessor` is composed but never invoked.** The composition root
-  builds it and closes it on shutdown; no route reaches it and no other module
-  calls it. It becomes reachable in the phase that adds detection over
-  documents. Its coverage therefore comes entirely from its own suites.
+- **Documents stop at detection.** No tokenization, vault interaction, provider
+  call, or restoration for documents. `DocumentStatus` still has no member the
+  system cannot reach; ADR-0032 records why readiness is a type rather than a
+  status, and Phase 16b added no migration.
+- **`DocumentAnalyzer` is composed but never invoked.** The composition root
+  builds it; no route reaches it and no other module calls it. It becomes
+  reachable in the phase that protects a document. Its coverage therefore comes
+  entirely from its own suites.
+- **Detection quality over documents is unmeasured.** The recognizers are the
+  prompt path's, and `docs/threat-model.md` already names detection quality as
+  the largest residual risk in the system. Running them over a document applies
+  the same recall to far more text; nothing has been evaluated against a
+  labelled corpus.
+- **A tenant cannot tighten the document entity budget.** `MAX_DOCUMENT_ENTITIES`
+  is a deployment setting, because `PolicyDocument.max_entities` is sized for a
+  chat request and applying it to a document would refuse ordinary ones. Adding
+  a per-tenant field is a policy schema change.
 - **Extraction does not stream.** A PDF cross-reference table sits at the end of
   the file and points backwards, so the parser needs the whole document. The
   bytes are buffered under `MAX_DOCUMENT_BYTES`, which is one more reason the
@@ -271,6 +298,9 @@ PYTHONPATH=. ./.venv/Scripts/python.exe scripts/demo_pipeline.py
 
 # The canary suite specifically
 ./.venv/Scripts/python.exe -m pytest tests/privacy -m privacy -v
+
+# Detection over documents: the span algebra, the analyzer, and the sweep
+./.venv/Scripts/python.exe -m pytest   tests/unit/test_document_analysis.py   tests/unit/test_document_analysis_spans.py   tests/privacy/test_document_analysis_canaries.py   tests/security/test_document_analysis_isolation.py -q
 
 # Coverage against the 90% target
 ./.venv/Scripts/python.exe -m pytest tests --cov=app --cov-report=term
@@ -344,11 +374,18 @@ docker compose exec minio mc cat l/sgw-documents/<key> | strings | head
    is the same mechanism pointed in a safer direction.
 3. **Close the Phase 15 gaps** — integration tests against disposable Postgres
    and Redis, and move security assertions into `tests/security/`.
-4. **Phase 16 — performance.** There is now an endpoint to measure and metrics
-   to measure it with; the alert thresholds in `docs/observability.md` should be
-   replaced with values this produces.
-5. **Populate the audit correlation HMACs**, or delete the columns. A field that
+4. **Protect a document.** `DocumentAnalyzer` produces everything tokenization
+   needs — global spans, actions, and a budget already enforced — and nothing
+   calls it. This is the phase that makes the document path end to end.
+5. **Performance.** There is now an endpoint to measure and metrics to measure
+   it with; the alert thresholds in `docs/observability.md` should be replaced
+   with values this produces. Extraction and detection are benchmarked
+   separately from the pipeline, per `docs/performance.md` §2.
+6. **Populate the audit correlation HMACs**, or delete the columns. A field that
    is always null is worse than an absent one.
+7. **Sweep the rest of the log call sites for defect 20.** The document path is
+   fixed and asserted. Nothing yet proves that every *other* module's log fields
+   survive the allowlist, and the failure mode is silent by construction.
 
 ---
 

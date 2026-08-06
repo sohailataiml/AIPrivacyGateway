@@ -84,9 +84,21 @@ behavior**, and **local infrastructure choices**.
 These extend the rule to three more areas: **where untrusted parsing runs**,
 **how offsets are represented**, and **what may be written down**.
 
+## Document Detection ADRs
+
+| ADR | Decision | Status |
+|---|---|---|
+| [0031](0031-merge-document-detections-on-global-offsets.md) | Merge document detections on global offsets, then apply policy | Accepted |
+| [0032](0032-readiness-is-a-type-not-a-status.md) | Readiness for protection is a type, not a document status | Accepted |
+
+Two more areas: **how detections from overlapping segments become one set of
+spans**, and **how a document says it is ready for the next stage**. ADR-0032
+extends ADR-0030 rather than qualifying it — because nothing is persisted, there
+is nothing for a status to describe.
+
 ### ADRs with an "As Built" section
 
-Most ADRs here record a decision that has not yet been implemented. Five record
+Most ADRs here record a decision that has not yet been implemented. Seven record
 decisions that have been, and carry an **As Built** section describing the
 shipped reality — the wire format, the derivation, the AAD fields, the isolation
 mechanism — and explicitly what the phase did *not* build:
@@ -96,6 +108,8 @@ mechanism — and explicitly what the phase did *not* build:
 - [0028](0028-spawned-process-extraction-isolation.md) — extraction isolation
 - [0029](0029-page-range-document-offsets.md) — document offsets
 - [0030](0030-do-not-persist-extracted-text.md) — extracted-text retention
+- [0031](0031-merge-document-detections-on-global-offsets.md) — span merging
+- [0032](0032-readiness-is-a-type-not-a-status.md) — the protection checkpoint
 
 Where an ADR has an As Built section, that section is the one to check code
 against. The Decision above it says what was agreed; the As Built section says

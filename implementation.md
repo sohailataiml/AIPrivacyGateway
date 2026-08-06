@@ -935,6 +935,71 @@ PROGRESS.md.
 
 ---
 
+## 20a. Phase 15b — Document Extraction and Segmentation
+
+Turns a stored document into detector-ready segments and stops there. See
+ADR-0028, ADR-0029, ADR-0030, and `docs/document-processing.md`.
+
+### Tasks
+
+- [x] TXT, PDF, and DOCX extraction as pure, picklable functions with their own
+      guards: strict UTF-8, encrypted PDFs refused, ZIP expansion and entry
+      limits read from the central directory before anything is decompressed.
+- [x] One **spawned** subprocess per document, bounded by a semaphore, with a
+      wall-clock deadline that terminates the worker rather than abandoning it,
+      and reaping on every exit path.
+- [x] One canonical text buffer; pages and segments are ranges into it with
+      global offsets, derived by slicing and never copied.
+- [x] Whitespace-aware segment boundaries plus overlap, property-tested.
+- [x] `DocumentProcessor` — open, decrypt, extract, segment. Nothing persisted:
+      no table, no object, no temporary file.
+- [x] Logger floors raised for `pypdf`, `docx`, and `lxml`, applied inside the
+      child as well as the parent.
+
+**No routes, no migration, and no new `DocumentStatus` member.**
+
+**Verified 2026-08-05.** Hypothesis found one defect during the checkpoint — a
+segment that could be wholly contained in its predecessor, which is correct-but
+-quietly-much-worse rather than wrong. See PROGRESS.md defect 19.
+
+---
+
+## 20b. Phase 15c — Document Detection and Labeled Spans
+
+Locates every sensitive value in a stored document and attaches the policy's
+decision. Tokenization, vault interaction, provider calls, and restoration are
+**not** in this phase, and the code contains no partial version of them. See
+ADR-0031, ADR-0032, ADR-0002, ADR-0014, and `docs/document-processing.md`.
+
+### Tasks
+
+- [x] Run the detector over every segment, bounded by
+      `DOCUMENT_DETECTION_CONCURRENCY` shared across documents.
+- [x] Promote segment-local offsets to document-global ones through
+      `Segment.to_global`, the single place that arithmetic is written.
+- [x] Coalesce detections sharing a span identity, keeping the highest score and
+      the union of the segments they came from.
+- [x] Apply the policy's `min_score` **before** resolving overlaps, then resolve
+      with the severity-first rule the prompt path uses.
+- [x] Label each survivor with the policy's action and the pages it touches.
+- [x] Refuse the document on a blocked entity type, naming the type and never
+      the value; bound labeled spans with `MAX_DOCUMENT_ENTITIES`.
+- [x] `AnalyzedDocument` as the checkpoint: it cannot hold overlapping,
+      backwards, out-of-range, or blocked spans.
+- [x] Wire `DocumentAnalyzer` in the composition root, sharing the one warmed
+      detector with the chat pipeline.
+- [x] Canary sweep over logs, `repr`, and errors, including the assertion that
+      no offset and no per-type breakdown reaches a log line.
+
+**No routes, no migration, and still no new `DocumentStatus` member** — ADR-0032
+records why readiness is a type rather than a status.
+
+**Verified 2026-08-05.** The checkpoint found one defect that predates this
+phase: every document log line was silently losing its fields to the logging
+allowlist. See PROGRESS.md defect 20.
+
+---
+
 
 ## 17. Phase 16 — Frontend Bootstrap
 

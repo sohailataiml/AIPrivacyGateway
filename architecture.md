@@ -806,10 +806,8 @@ uploads is not made to configure a bucket.
 
 ## 9.12 Document Extraction and Segmentation
 
-Turns a stored document into ordered segments a detector can run over. **Nothing
-invokes it yet**: `DocumentProcessor` is assembled by the composition root and
-closed on shutdown, but no route reaches it and no other module calls it. It
-becomes reachable in the phase that adds detection over documents.
+Turns a stored document into ordered segments a detector can run over. Reached
+only through §9.13; no route reaches it directly.
 
 ### Structure
 
@@ -870,6 +868,64 @@ Fail closed. A file that Phase 1 stored can still be refused here, with
 `DOCUMENT_EXTRACTION_FAILED` (422) for an unparseable file or
 `DOCUMENT_EXTRACTION_TIMEOUT` (503) for one that overran its budget. Extraction
 failing does not destroy the caller's stored document.
+
+---
+
+## 9.13 Document Detection and Labeled Spans
+
+Runs the detector over every segment and merges the results into one set of
+document-global spans, each carrying the policy's decision. **Nothing invokes it
+yet**: `DocumentAnalyzer` is assembled by the composition root, but no route
+reaches it and no other module calls it. It becomes reachable in the phase that
+protects a document.
+
+### Structure
+
+| Module | Responsibility |
+|---|---|
+| `app/documents/analysis/models.py` | `LabeledSpan` and `AnalyzedDocument` — the checkpoint types |
+| `app/documents/analysis/spans.py` | The pure span algebra: promote, coalesce, filter, resolve, label |
+| `app/documents/analysis/analyzer.py` | `DocumentAnalyzer` — orchestration, bounds, and refusals |
+
+### Merging (ADR-0031)
+
+Segmentation hands the detector overlapping windows on purpose, so the same
+value is reported more than once and a cut can manufacture a fragment that still
+looks like a whole entity. Five steps, in this order:
+
+1. **Promote** to global offsets via `Segment.to_global`.
+2. **Coalesce** on `(entity_type, start, end)`, keeping the highest score and the
+   union of segment indexes.
+3. **Select confident** against the policy's `min_score` for the type.
+4. **Resolve overlaps** with the §9.4 rule. A fragment loses to the whole value
+   because that rule already prefers the longer span.
+5. **Label** with the policy's action and the pages touched.
+
+Steps 3 and 4 are in that order because the reverse loses values: severity is
+the first key of the ordering rule, so a sub-threshold high-severity span can
+win a contest and then be dropped, leaving nothing protecting those characters.
+
+Detection is **not** narrowed to the policy's entity types, and diagnostics are
+off and not configurable.
+
+### Readiness (ADR-0032)
+
+An `AnalyzedDocument` cannot hold overlapping, backwards, out-of-range, or
+blocked spans — construction refuses all four. The phase that protects a
+document therefore re-validates none of it. No `DocumentStatus` member and no
+migration: nothing is persisted, so there is nothing for a status to describe.
+
+### Bounds and failure behaviour
+
+`DOCUMENT_DETECTION_CONCURRENCY` bounds segments detected at once, shared across
+documents. `MAX_DOCUMENT_ENTITIES` bounds labeled spans per document — a
+deployment setting rather than the policy's per-request `max_entities`, which is
+sized for a prompt.
+
+Fail closed throughout. A blocked entity type raises `POLICY_VIOLATION` (422)
+naming the type and never the value; an over-budget document raises
+`ENTITY_LIMIT_EXCEEDED` (422); a detector that cannot run raises
+`PRIVACY_DETECTOR_UNAVAILABLE` (503). One failing segment cancels the rest.
 
 ---
 
@@ -1280,6 +1336,10 @@ secure-ai-gateway/
 │   │   ├── segmentation.py
 │   │   ├── service.py
 │   │   ├── validation.py
+│   │   ├── analysis/
+│   │   │   ├── analyzer.py
+│   │   │   ├── models.py
+│   │   │   └── spans.py
 │   │   ├── extraction/
 │   │   │   ├── extractors.py
 │   │   │   ├── models.py
