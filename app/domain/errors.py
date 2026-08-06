@@ -42,6 +42,14 @@ class ErrorCode(StrEnum):
     PROVIDER_RESPONSE_INVALID = "PROVIDER_RESPONSE_INVALID"
     RESTORATION_FAILED = "RESTORATION_FAILED"
     AUDIT_UNAVAILABLE = "AUDIT_UNAVAILABLE"
+    DOCUMENT_NOT_FOUND = "DOCUMENT_NOT_FOUND"
+    DOCUMENT_TOO_LARGE = "DOCUMENT_TOO_LARGE"
+    DOCUMENT_TYPE_UNSUPPORTED = "DOCUMENT_TYPE_UNSUPPORTED"
+    DOCUMENT_INVALID = "DOCUMENT_INVALID"
+    DOCUMENT_STORAGE_UNAVAILABLE = "DOCUMENT_STORAGE_UNAVAILABLE"
+    DOCUMENT_ENCRYPTION_FAILED = "DOCUMENT_ENCRYPTION_FAILED"
+    DOCUMENT_EXTRACTION_FAILED = "DOCUMENT_EXTRACTION_FAILED"
+    DOCUMENT_EXTRACTION_TIMEOUT = "DOCUMENT_EXTRACTION_TIMEOUT"
     INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
@@ -130,6 +138,41 @@ ERROR_CATALOG: Final[dict[ErrorCode, tuple[HTTPStatus, str]]] = {
         HTTPStatus.SERVICE_UNAVAILABLE,
         "The audit service is unavailable.",
     ),
+    ErrorCode.DOCUMENT_NOT_FOUND: (
+        HTTPStatus.NOT_FOUND,
+        "No such document.",
+    ),
+    ErrorCode.DOCUMENT_TOO_LARGE: (
+        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+        "The document exceeds the configured size limit.",
+    ),
+    ErrorCode.DOCUMENT_TYPE_UNSUPPORTED: (
+        HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+        "The document type is not supported.",
+    ),
+    ErrorCode.DOCUMENT_INVALID: (
+        HTTPStatus.BAD_REQUEST,
+        "The document could not be accepted.",
+    ),
+    ErrorCode.DOCUMENT_STORAGE_UNAVAILABLE: (
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        "The document storage service is unavailable.",
+    ),
+    ErrorCode.DOCUMENT_ENCRYPTION_FAILED: (
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        "The document storage service could not complete the operation.",
+    ),
+    ErrorCode.DOCUMENT_EXTRACTION_FAILED: (
+        # 422 rather than 500: the request was well formed and the file was
+        # not. Saying so does not disclose anything about the file, because the
+        # reason code never leaves the log.
+        HTTPStatus.UNPROCESSABLE_ENTITY,
+        "The document could not be read.",
+    ),
+    ErrorCode.DOCUMENT_EXTRACTION_TIMEOUT: (
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        "The document could not be read in the time allowed.",
+    ),
     ErrorCode.INTERNAL_ERROR: (
         HTTPStatus.INTERNAL_SERVER_ERROR,
         "An internal error occurred.",
@@ -211,6 +254,63 @@ class VaultUnavailableError(GatewayError):
 
 class VaultEncryptionError(GatewayError):
     code = ErrorCode.VAULT_ENCRYPTION_FAILED
+
+
+class DocumentNotFoundError(GatewayError):
+    """Raised for a document this tenant and user cannot address.
+
+    Deliberately the same answer whether the document never existed, was
+    deleted, or belongs to somebody else -- distinguishing them would make the
+    endpoint an oracle for which document ids exist.
+    """
+
+    code = ErrorCode.DOCUMENT_NOT_FOUND
+
+
+class DocumentTooLargeError(GatewayError):
+    code = ErrorCode.DOCUMENT_TOO_LARGE
+
+
+class DocumentTypeUnsupportedError(GatewayError):
+    code = ErrorCode.DOCUMENT_TYPE_UNSUPPORTED
+
+
+class DocumentInvalidError(GatewayError):
+    """A filename, declared type, or byte stream that failed validation."""
+
+    code = ErrorCode.DOCUMENT_INVALID
+
+
+class DocumentStorageUnavailableError(GatewayError):
+    code = ErrorCode.DOCUMENT_STORAGE_UNAVAILABLE
+
+
+class DocumentEncryptionError(GatewayError):
+    code = ErrorCode.DOCUMENT_ENCRYPTION_FAILED
+
+
+class DocumentExtractionError(GatewayError):
+    """The document could not be parsed into text.
+
+    Covers a corrupt file, an encrypted PDF, a decompression bomb, and a
+    document whose extracted text exceeds the configured ceiling. They share a
+    code deliberately: the distinction matters to an operator reading the
+    reason in a log, and telling a caller which one it was describes the file
+    back to whoever supplied it.
+    """
+
+    code = ErrorCode.DOCUMENT_EXTRACTION_FAILED
+
+
+class DocumentExtractionTimeoutError(GatewayError):
+    """Extraction exceeded its wall-clock budget and the worker was killed.
+
+    Separate from ``DocumentExtractionError`` because the remedies differ: a
+    parse failure is about the file, a timeout is about capacity or a parser
+    that does not terminate.
+    """
+
+    code = ErrorCode.DOCUMENT_EXTRACTION_TIMEOUT
 
 
 class ProviderNotAllowedError(GatewayError):

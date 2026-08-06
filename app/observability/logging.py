@@ -63,6 +63,26 @@ ALLOWED_EVENT_KEYS: Final[frozenset[str]] = frozenset(
         "attempt",
         "retry_after",
         "key_id",
+        # Document pipeline. Every one of these is Internal by
+        # docs/data-classification.md -- an opaque id, a declared MIME type, or
+        # a count. The filename is Restricted and is deliberately *not* here.
+        #
+        # They were missing until the detection phase, so every document log line
+        # silently lost its fields to the allowlist and reported nothing an
+        # operator could correlate to a document. Deny-by-default failed safe,
+        # which is why nothing broke and nobody noticed; PROGRESS.md defect 20.
+        "document_id",
+        "content_type",
+        "byte_size",
+        "page_count",
+        "character_count",
+        "segment_count",
+        "removed",
+        "limit",
+        "page_index",
+        "timeout_seconds",
+        "operation",
+        "failure_type",
     }
 )
 

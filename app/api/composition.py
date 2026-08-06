@@ -17,7 +17,7 @@ Two rules govern the wiring:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -33,14 +33,25 @@ from app.config.settings import Settings
 from app.db.session import build_engine_from_settings, build_session_factory
 from app.detection.config import DetectionConfig
 from app.detection.engine import PresidioDetector
+from app.documents.analysis.analyzer import DocumentAnalyzer
+from app.documents.crypto import DocumentCipher
+from app.documents.extraction.runner import SubprocessExtractionRunner
+from app.documents.pipeline import DocumentPipeline
+from app.documents.processing import DocumentProcessor
+from app.documents.protection import DocumentProtector
+from app.documents.protocol import DocumentStore
+from app.documents.segmentation import Segmenter
+from app.documents.service import DocumentService
+from app.documents.storage.s3 import S3CompatibleDocumentStore
 from app.llm.registry import build_default_registry
 from app.observability.logging import get_logger
+from app.outbound.gateway import OutboundGateway
 from app.pipeline.service import SecurePipeline
 from app.policy.service import PolicyService
 from app.restoration.pipeline import OutputPipeline
 from app.tokenization.tokenizer import Tokenizer
 from app.vault.crypto import EnvelopeCipher
-from app.vault.keys import SettingsKeyRing
+from app.vault.keys import DocumentSettingsKeyRing, SettingsKeyRing
 from app.vault.redis_vault import RedisTokenVault
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -65,6 +76,39 @@ class Services:
     vault: RedisTokenVault
     audit: AuditService
     rate_limiter: RedisRateLimiter
+    documents: DocumentService | None
+    """``None`` when ``DOCUMENTS_ENABLED`` is false and the routes are absent."""
+
+    document_processor: DocumentProcessor | None
+    """Extraction and segmentation. Present exactly when ``documents`` is.
+
+    Reached only through ``document_analyzer``. It is assembled here so its
+    worker bound and its shutdown are wired once, in the one place that knows
+    how parts fit.
+    """
+
+    document_analyzer: DocumentAnalyzer | None
+    """Detection over documents. Present exactly when ``documents`` is.
+
+    Reached only through ``document_protector``. It owns no handle of its own,
+    so it needs no closer: the processor it reads through is closed below.
+    """
+
+    document_protector: DocumentProtector | None
+    """Tokenization over documents. Present exactly when ``documents`` is.
+
+    Reached through ``document_pipeline``. It shares the chat pipeline's
+    tokenizer, so it shares the vault, the fingerprint pepper, and the token
+    grammar -- which is what lets a document's tokens be restored by the same
+    machinery that restores a prompt's.
+    """
+
+    document_pipeline: DocumentPipeline | None
+    """The document request end to end. Present exactly when ``documents`` is.
+
+    Reached by ``POST /v1/documents/{id}/process``. It owns no handle of its
+    own; everything it uses is closed on its own line below.
+    """
 
     def session_scope(self) -> AbstractAsyncContextManager[AsyncSession]:
         """Open one short-lived session."""
@@ -87,11 +131,12 @@ async def build_services(
     *,
     redis: Redis | None = None,
     engine: AsyncEngine | None = None,
+    document_store: DocumentStore | None = None,
 ) -> Services:
     """Construct every long-lived service. Raises if a dependency is unreachable.
 
-    ``redis`` and ``engine`` exist so tests can supply fakes. Production passes
-    neither and gets clients built from settings. Without these seams the
+    ``redis``, ``engine``, and ``document_store`` exist so tests can supply
+    fakes. Production passes none of them and builds clients from settings. Without these seams the
     lifespan would be reachable only with a live Redis and PostgreSQL, which in
     practice means it would not be tested at all.
 
@@ -124,14 +169,62 @@ async def build_services(
         AuditSinkAdapter(scope),
         fail_closed=settings.audit_fail_closed,
     )
+    correlation_hasher = CorrelationHasher.from_settings(settings)
+    provider_registry = build_default_registry(settings)
+    # One outbound boundary for every route. The chat pipeline and the document
+    # pipeline share it, so the scan and the attestation cannot exist on one
+    # path and be missing from the other.
+    outbound = OutboundGateway(
+        detector=detector, providers=provider_registry, hasher=correlation_hasher
+    )
     pipeline = SecurePipeline(
         policy_service=policy_service,
         detector=detector,
         tokenizer=tokenizer,
-        provider_registry=build_default_registry(settings),
+        provider_registry=provider_registry,
+        outbound=outbound,
         output_pipeline=output_pipeline,
-        audit_service=PipelineAuditAdapter(audit, hasher=CorrelationHasher.from_settings(settings)),
+        audit_service=PipelineAuditAdapter(audit, hasher=correlation_hasher),
         settings=settings,
+    )
+
+    documents = (
+        _build_document_service(settings, scope, document_store)
+        if settings.documents_enabled
+        else None
+    )
+
+    document_processor = (
+        _build_document_processor(settings, documents) if documents is not None else None
+    )
+    document_analyzer = (
+        _build_document_analyzer(settings, document_processor, detector, policy_service)
+        if document_processor is not None
+        else None
+    )
+    document_protector = (
+        DocumentProtector(
+            analysis=document_analyzer,
+            tokenizer=tokenizer,
+            # The same warmed detector every other stage uses. A second one
+            # could be configured differently, and an instruction would then be
+            # scanned to a different standard than the document beside it.
+            detector=detector,
+            max_entities=settings.max_document_entities,
+        )
+        if document_analyzer is not None
+        else None
+    )
+    document_pipeline = (
+        DocumentPipeline(
+            protection=document_protector,
+            policies=policy_service,
+            outbound=outbound,
+            restorer=output_pipeline,
+            audit=audit,
+        )
+        if document_protector is not None
+        else None
     )
 
     return Services(
@@ -144,6 +237,73 @@ async def build_services(
         vault=vault,
         audit=audit,
         rate_limiter=RedisRateLimiter(redis=redis),
+        documents=documents,
+        document_processor=document_processor,
+        document_analyzer=document_analyzer,
+        document_protector=document_protector,
+        document_pipeline=document_pipeline,
+    )
+
+
+def _build_document_service(
+    settings: Settings,
+    scope: Callable[[], AbstractAsyncContextManager[AsyncSession]],
+    store: DocumentStore | None = None,
+) -> DocumentService:
+    """Assemble document storage. Its own key ring, separate from the vault's."""
+    return DocumentService(
+        store=store if store is not None else S3CompatibleDocumentStore.from_settings(settings),
+        cipher=DocumentCipher(
+            DocumentSettingsKeyRing(settings),
+            chunk_bytes=settings.document_chunk_bytes,
+        ),
+        session_scope=scope,
+        max_document_bytes=settings.max_document_bytes,
+    )
+
+
+def _build_document_processor(settings: Settings, documents: DocumentService) -> DocumentProcessor:
+    """Assemble extraction and segmentation over the storage service.
+
+    Reads through ``DocumentService`` rather than the store directly, so it
+    inherits the tenant and user scoping and the per-document decryption
+    instead of opening a second, laxer path to the same bytes.
+    """
+    return DocumentProcessor(
+        source=documents,
+        runner=SubprocessExtractionRunner(
+            max_workers=settings.extraction_max_workers,
+            timeout_seconds=settings.extraction_timeout_seconds,
+            max_characters=settings.max_extracted_characters,
+        ),
+        segmenter=Segmenter(
+            max_characters=settings.segment_max_characters,
+            overlap_characters=settings.segment_overlap_characters,
+        ),
+        max_document_bytes=settings.max_document_bytes,
+    )
+
+
+def _build_document_analyzer(
+    settings: Settings,
+    processor: DocumentProcessor,
+    detector: PresidioDetector,
+    policies: PolicyService,
+) -> DocumentAnalyzer:
+    """Assemble detection over documents.
+
+    Shares the one warmed ``PresidioDetector`` with the chat pipeline rather
+    than building a second. A separate instance would load spaCy again --
+    hundreds of megabytes for no benefit -- and, worse, could be configured
+    differently, so a value protected in a prompt might not be protected in a
+    document.
+    """
+    return DocumentAnalyzer(
+        source=processor,
+        detector=detector,
+        policies=policies,
+        max_entities=settings.max_document_entities,
+        concurrency=settings.document_detection_concurrency,
     )
 
 
@@ -161,13 +321,21 @@ async def stop_services(services: Services) -> None:
     Each step is guarded: one failing close must not skip the rest, or a failed
     shutdown leaks a connection pool into whatever replaces this process.
     """
-    for name, close in (
+    closers: list[tuple[str, Callable[[], Awaitable[object]]]] = [
         # The audit queue writes to PostgreSQL, so it drains before the engine
         # is disposed -- otherwise queued events die with the pool.
         ("audit", services.audit.stop),
         ("redis", services.redis.aclose),
-        ("engine", services.engine.dispose),
-    ):
+    ]
+    if services.document_processor is not None:
+        # Before the storage service it reads through, so a worker cannot be
+        # mid-extraction against a store that has already been closed.
+        closers.append(("document_processor", services.document_processor.aclose))
+    if services.documents is not None:
+        closers.append(("documents", services.documents.aclose))
+    closers.append(("engine", services.engine.dispose))
+
+    for name, close in closers:
         try:
             await close()
         except Exception:  # shutdown continues regardless of one bad step

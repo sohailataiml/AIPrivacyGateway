@@ -23,11 +23,14 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from app.domain.errors import GatewayError
+from app.domain.models import VaultWriteRequest
 from app.tokenization.grammar import format_token, parse_token
 from app.tokenization.ids import new_token_id
 from app.vault.tokens import validate_entity_type
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from app.domain.errors import GatewayError as _GatewayError
 
 
@@ -75,44 +78,62 @@ class InMemoryTokenVault:
         ]
 
     # -- TokenVault -------------------------------------------------------
-    async def get_or_create(
+    async def get_or_create_many(
         self,
         *,
         tenant_id: UUID,
         session_id: UUID,
-        entity_type: str,
-        normalized_hmac: str,
-        original_value: str,
+        entries: Sequence[VaultWriteRequest],
         ttl_seconds: int,
-    ) -> str:
+    ) -> tuple[str, ...]:
         self._guard()
-        validate_entity_type(entity_type)
+        for entry in entries:
+            validate_entity_type(entry.entity_type)
         if ttl_seconds < 1:
             raise ValueError("ttl_seconds must be at least 1")
+        if not entries:
+            return ()
 
         now = self._clock()
         expires_at = now + ttl_seconds
+        # One lock for the whole batch, mirroring the single Lua invocation in
+        # ``RedisTokenVault``: a concurrent caller sees all of it or none.
         with self._lock:
             session = self._sessions.setdefault((tenant_id, session_id), _Session())
             self._purge(session, now)
-
-            existing = session.index.get((entity_type, normalized_hmac))
-            if existing is not None:
-                parsed = parse_token(existing)
-                if parsed is not None and parsed.token_id in session.records:
-                    session.records[parsed.token_id].expires_at = expires_at
-                    return existing
-
-            token_id = new_token_id()
-            token = format_token(entity_type, token_id)
-            session.records[token_id] = _Entry(
-                token=token,
-                entity_type=entity_type,
-                original_value=original_value,
-                expires_at=expires_at,
+            return tuple(
+                self._get_or_create_locked(session, entry, expires_at) for entry in entries
             )
-            session.index[(entity_type, normalized_hmac)] = token
-            return token
+
+    def _get_or_create_locked(
+        self,
+        session: _Session,
+        entry: VaultWriteRequest,
+        expires_at: float,
+    ) -> str:
+        """Mint or reuse one mapping. The caller holds the lock.
+
+        Repeats within a batch land here twice and take the reuse path the
+        second time, so duplicates collapse whether or not the caller
+        deduplicated first.
+        """
+        existing = session.index.get((entry.entity_type, entry.normalized_hmac))
+        if existing is not None:
+            parsed = parse_token(existing)
+            if parsed is not None and parsed.token_id in session.records:
+                session.records[parsed.token_id].expires_at = expires_at
+                return existing
+
+        token_id = new_token_id()
+        token = format_token(entry.entity_type, token_id)
+        session.records[token_id] = _Entry(
+            token=token,
+            entity_type=entry.entity_type,
+            original_value=entry.original_value,
+            expires_at=expires_at,
+        )
+        session.index[(entry.entity_type, entry.normalized_hmac)] = token
+        return token
 
     async def resolve_many(
         self,

@@ -731,6 +731,298 @@ Trace spans may contain component names, timing, and result codes. Prompt text a
 
 ---
 
+## 9.11 Document Storage
+
+Extends the gateway from prompt text to files. **Storage, extraction, and
+segmentation are built; everything downstream of them is not** — there is no
+detection, tokenization, or restoration for documents. The full specification,
+with the built/specified boundary marked at each step, is
+[docs/document-processing.md](docs/document-processing.md).
+
+### Responsibilities
+
+Accept an uploaded file, validate it at the boundary, seal it, put it in
+S3-compatible object storage, and give it back to exactly one principal. Store
+metadata in PostgreSQL and document bytes nowhere else.
+
+### Structure
+
+| Module | Responsibility |
+|---|---|
+| `app/documents/validation.py` | Pure boundary checks: filename, type, length |
+| `app/documents/crypto.py` | The wire format and the chunked cipher |
+| `app/documents/models.py` | Domain types and the accepted-type table |
+| `app/documents/protocol.py` | The `DocumentStore` seam |
+| `app/documents/storage/s3.py` | aioboto3 adapter — MinIO, S3, or any compatible endpoint |
+| `app/documents/storage/fakes.py` | In-memory store for tests in other packages |
+| `app/documents/repository.py` | Tenant- and user-scoped metadata access |
+| `app/documents/service.py` | Order of operations, and the consistency guarantee |
+| `app/api/v1/documents.py` | Four routes under `/v1` |
+
+Nothing above the `DocumentStore` protocol knows whether it is talking to MinIO
+or AWS. Nothing below it knows what a document is.
+
+### Encryption
+
+Per-document data keys derived with HKDF-SHA256, then AES-256-GCM applied
+**per chunk** rather than to the whole document — single-shot GCM would force a
+25 MiB file into memory to encrypt and again to verify. Associated data binds
+tenant, user, document, content type, schema version, purpose, chunk index, and
+a final-chunk flag. See ADR-0020 and ADR-0021 for the format and the reasoning.
+
+### Storage layout
+
+| Where | What |
+|---|---|
+| Object store | Ciphertext, under a random opaque key with a `documents/` prefix, written as `application/octet-stream` with no user metadata |
+| PostgreSQL | Identifiers, content type, byte size, SHA-256, status, timestamps, and the **encrypted** filename |
+| Anywhere else | Nothing |
+
+### Streaming and multipart
+
+Both directions stream. The adapter switches to S3 multipart past the part
+threshold and fills each part to the 5 MiB minimum, because S3 rejects any part
+but the last below it. Any failure — including a client disconnect arriving as
+task cancellation — aborts the upload explicitly, because abandoned parts do not
+appear in an object listing and are billed until a lifecycle rule finds them.
+
+### Consistency
+
+A document is a row and an object with no transaction spanning the two, so
+ordering carries the guarantee: validate, insert `receiving`, stream and seal
+and upload, then mark `stored`. Deletion runs object-first. The invariant is
+that a row never claims `stored` for an object that is not there, and no object
+survives with nothing pointing at it.
+
+### Failure behaviour
+
+Fail closed (ADR-0008). An unreachable object store fails the upload and marks
+the row `failed`; readiness reports `object_store: down` while liveness stays
+up. `DOCUMENTS_ENABLED=false` unmounts the routes entirely and removes the
+object-store configuration requirement, so a deployment that does not accept
+uploads is not made to configure a bucket.
+
+---
+
+## 9.12 Document Extraction and Segmentation
+
+Turns a stored document into ordered segments a detector can run over. Reached
+only through §9.13; no route reaches it directly.
+
+### Structure
+
+| Module | Responsibility |
+|---|---|
+| `app/documents/extraction/models.py` | `ExtractedDocument` — one text buffer, pages as ranges |
+| `app/documents/extraction/extractors.py` | Pure, picklable per-type parsing plus its guards |
+| `app/documents/extraction/runner.py` | The `ExtractionRunner` seam and the subprocess isolation |
+| `app/documents/segmentation.py` | Boundary rules, overlap, and global offsets |
+| `app/documents/processing.py` | `DocumentProcessor` — open, decrypt, extract, segment |
+
+### Isolation (ADR-0028)
+
+One **spawned** subprocess per document, concurrency capped by an
+`asyncio.Semaphore`, and a wall-clock timeout that `terminate()`s the worker
+rather than abandoning it. Only bytes and safe reason codes cross the boundary;
+exceptions are never pickled back, because a traceback holds frames that hold
+the document. The child is reaped on every exit path.
+
+`spawn` rather than `fork` on every platform: a forked child would inherit the
+parent's memory — key rings, sockets, the audit queue — into the process whose
+whole job is running a parser over an attacker's file.
+
+### Types and guards
+
+TXT (strict UTF-8), PDF (pypdf, per-page text, encrypted files refused), and
+DOCX (python-docx, paragraphs and table cells, one page because a DOCX stores no
+pagination). A DOCX is a ZIP, so its expansion ratio and member count are checked
+against the central directory *before* anything is decompressed. The extracted
+character count is bounded inside the worker while accumulating.
+
+`pypdf`, `docx`, and `lxml` have their logger floors raised to `INFO`, applied
+inside the child as well as the parent.
+
+### Offsets (ADR-0029)
+
+One canonical text buffer; pages and segments are ranges into it with global
+offsets, derived by slicing rather than copied. Pages must be ordered,
+non-overlapping, contiguous, and cover the buffer exactly — a gap or an overlap
+is refused at construction, so offset drift is unrepresentable.
+
+### Segmentation
+
+Whitespace-aware boundaries plus overlap. The overlap is a privacy control: an
+entity shorter than it is guaranteed to appear whole in at least one segment,
+and a boundary falling mid-value is a fail-open condition. Duplicate detections
+across overlapping segments collapse on their global offsets.
+
+### Retention (ADR-0030)
+
+Extracted text is never persisted — no table, no object, no temporary file. It
+exists for the life of one call. Because nothing is stored, no `DocumentStatus`
+member was added and no migration was written.
+
+### Failure behaviour
+
+Fail closed. A file that Phase 1 stored can still be refused here, with
+`DOCUMENT_EXTRACTION_FAILED` (422) for an unparseable file or
+`DOCUMENT_EXTRACTION_TIMEOUT` (503) for one that overran its budget. Extraction
+failing does not destroy the caller's stored document.
+
+---
+
+## 9.13 Document Detection and Labeled Spans
+
+Runs the detector over every segment and merges the results into one set of
+document-global spans, each carrying the policy's decision. **Nothing invokes it
+yet**: `DocumentAnalyzer` is assembled by the composition root, but no route
+reaches it and no other module calls it. It becomes reachable in the phase that
+protects a document.
+
+### Structure
+
+| Module | Responsibility |
+|---|---|
+| `app/documents/analysis/models.py` | `LabeledSpan` and `AnalyzedDocument` — the checkpoint types |
+| `app/documents/analysis/spans.py` | The pure span algebra: promote, coalesce, filter, resolve, label |
+| `app/documents/analysis/analyzer.py` | `DocumentAnalyzer` — orchestration, bounds, and refusals |
+
+### Merging (ADR-0031)
+
+Segmentation hands the detector overlapping windows on purpose, so the same
+value is reported more than once and a cut can manufacture a fragment that still
+looks like a whole entity. Five steps, in this order:
+
+1. **Promote** to global offsets via `Segment.to_global`.
+2. **Coalesce** on `(entity_type, start, end)`, keeping the highest score and the
+   union of segment indexes.
+3. **Select confident** against the policy's `min_score` for the type.
+4. **Resolve overlaps** with the §9.4 rule. A fragment loses to the whole value
+   because that rule already prefers the longer span.
+5. **Label** with the policy's action and the pages touched.
+
+Steps 3 and 4 are in that order because the reverse loses values: severity is
+the first key of the ordering rule, so a sub-threshold high-severity span can
+win a contest and then be dropped, leaving nothing protecting those characters.
+
+Detection is **not** narrowed to the policy's entity types, and diagnostics are
+off and not configurable.
+
+### Readiness (ADR-0032)
+
+An `AnalyzedDocument` cannot hold overlapping, backwards, out-of-range, or
+blocked spans — construction refuses all four. The phase that protects a
+document therefore re-validates none of it. No `DocumentStatus` member and no
+migration: nothing is persisted, so there is nothing for a status to describe.
+
+### Bounds and failure behaviour
+
+`DOCUMENT_DETECTION_CONCURRENCY` bounds segments detected at once, shared across
+documents. `MAX_DOCUMENT_ENTITIES` bounds labeled spans per document — a
+deployment setting rather than the policy's per-request `max_entities`, which is
+sized for a prompt.
+
+Fail closed throughout. A blocked entity type raises `POLICY_VIOLATION` (422)
+naming the type and never the value; an over-budget document raises
+`ENTITY_LIMIT_EXCEEDED` (422); a detector that cannot run raises
+`PRIVACY_DETECTOR_UNAVAILABLE` (503). One failing segment cancels the rest.
+
+---
+
+## 9.14 Document Protection
+
+Applies the labeled spans and persists the mappings they need. **Nothing invokes
+it yet**: `DocumentProtector` is assembled by the composition root, but no route
+reaches it and no other module calls it. It becomes reachable in the phase that
+sends a document to a provider.
+
+`app/documents/protection.py` is one module, and it **calls the prompt
+tokenizer** rather than implementing a second one (ADR-0033). The two things a
+document-specific implementation would duplicate are the two where a mistake is
+silent: the splice runs right to left because every offset indexes the original
+string, and mappings are minted in one call (ADR-0022).
+
+Three things make that reuse safe:
+
+| Concern | Answer |
+|---|---|
+| Which policy | The snapshot `AnalyzedDocument` carries. Re-resolving could apply actions the labels never agreed to |
+| Which budget | `MAX_DOCUMENT_ENTITIES`, substituted through a read-through view. The tokenizer's own ceiling is per-request |
+| Which session | The caller's. A token resolves only in the session it was minted in |
+
+The tokenizer re-derives actions from the policy it is given, and the protector
+**verifies the derivation reproduced the labels** — refusing a result that acted
+on a different number of spans than were labeled, rather than sending text with
+an original still in it.
+
+`ProtectedDocument` is the provider checkpoint, the document-shaped counterpart
+of `ProtectedChatRequest`. It carries no mappings; the originals are in the
+vault. A blocked entity type is refused by detection, before protection begins,
+so a document destined to fail reaches no vault call.
+
+---
+
+## 9.15 The Shared Outbound Boundary
+
+The last four stages, and the first place in this system where a privacy claim
+produces evidence rather than resting on a test (ADR-0024).
+
+| Module | Responsibility |
+|---|---|
+| `app/outbound/serialization.py` | The canonical byte string that gets attested |
+| `app/outbound/scan.py` | The pre-transmission privacy scan |
+| `app/outbound/gateway.py` | `OutboundGateway` — the one door to a provider |
+| `app/documents/pipeline.py` | `DocumentPipeline` — document stage order and its audit row |
+| `app/pipeline/service.py` | `SecurePipeline` — the chat path, through the same gateway |
+
+**Both routes share one `OutboundGateway` instance.** A caller cannot reach an
+adapter without passing through `send`, and the scan runs inside it before the
+adapter is touched, so there is no route on which the check can be forgotten.
+`send` accepts an optional `invoke` callable so the chat pipeline can supply its
+deadline and concurrency bound — that injects *how* the adapter is awaited,
+never *whether*.
+
+### Order
+
+`protect → serialize → scan → transmit → restore → attest`. Serialization
+produces **one** byte string, used for all three of the scan, the transmission,
+and the attestation; three renderings would be three chances to check one thing
+and send another. The scan runs before the provider call, because afterwards a
+check is a report rather than a control.
+
+### Serialization
+
+Framing version, provider alias, model alias, policy version, and each message's
+role and content, length-prefixed. Not the provider's wire format — that belongs
+to the adapter and changes with its SDK. The request id is outside the frame so
+identical payloads attest identically and a digest can be recomputed.
+
+### The scan
+
+Detection over the payload, **message by message**; any finding the policy would
+act on refuses the request. Two exclusions make it usable rather than
+theoretical:
+
+- Detections inside a gateway token or a redaction are discarded. A token's
+  26-character identifier reads as an account number.
+- Messages are scanned separately rather than concatenated. Presidio's NER is
+  context-sensitive, so the join produces findings no protection pass could have
+  seen and would refuse ordinary traffic.
+
+### Attestation
+
+`audit_events.outbound_hmac` (keyed digest of the transmitted bytes, its own
+domain constant) and `audit_events.outbound_scan` (`clean` or `blocked`), written
+on both paths. A digest, never a payload.
+
+### The document route
+
+Requires `documents:read` **and** `chat:invoke`. The instruction travels as a
+system message, separate from the document and **protected under the same
+session**, so a value it shares with the document resolves to one token.
+
+---
+
 ## 10. API Contract Summary
 
 ### `POST /v1/chat`
@@ -776,6 +1068,33 @@ Response:
 ### `POST /v1/detect`
 
 Administrative or diagnostic endpoint. It returns spans, types, scores, and intended actions. It must require a dedicated scope. By default, it must not echo original values.
+
+### `POST /v1/documents`
+
+`multipart/form-data` upload of one TXT, PDF, or DOCX file, sealed and stored.
+Requires the `documents:write` scope. Returns the stored document's metadata and
+its filename; never a storage key. Exempt from the JSON body size limit and
+bounded instead by `MAX_DOCUMENT_BYTES`, checked both from the declared
+`Content-Length` and from the real byte count as it streams.
+
+### `GET /v1/documents/{document_id}`
+
+Streams the original bytes back to the principal that uploaded them. Requires
+`documents:read`. Sends `Cache-Control: no-store` and an RFC 5987–encoded
+`Content-Disposition`, because a filename may hold non-ASCII characters and a
+raw one in a header is a response-splitting risk.
+
+### `GET /v1/documents/{document_id}/status`
+
+Metadata only — `receiving`, `stored`, or `failed`. Touches no key and reads no
+object, so polling is cheap and never causes a decryption. Deliberately carries
+no filename.
+
+### `DELETE /v1/documents/{document_id}`
+
+Destroys the object and the row. Answers `204` whether or not the document
+existed, for the same reason session deletion does: a different answer for
+"never existed" would make this an oracle for which document ids are real.
 
 ### `DELETE /v1/sessions/{session_id}`
 
@@ -1075,29 +1394,61 @@ Use a typed settings class. Fail startup on invalid production configuration.
 secure-ai-gateway/
 ├── architecture.md
 ├── implementation.md
+├── NFR.md
+├── PROGRESS.md
 ├── README.md
 ├── pyproject.toml
 ├── uv.lock
 ├── .env.example
 ├── docker-compose.yml
+├── docker-compose.dev.yml
 ├── Dockerfile
 ├── alembic.ini
 ├── app/
 │   ├── main.py
 │   ├── api/
-│   │   ├── dependencies.py
+│   │   ├── composition.py
 │   │   ├── errors.py
+│   │   ├── middleware.py
 │   │   └── v1/
 │   │       ├── chat.py
 │   │       ├── detect.py
+│   │       ├── documents.py
 │   │       ├── health.py
 │   │       └── sessions.py
 │   ├── auth/
 │   ├── audit/
 │   ├── config/
+│   ├── db/
 │   ├── detection/
+│   ├── documents/
+│   │   ├── crypto.py
+│   │   ├── models.py
+│   │   ├── processing.py
+│   │   ├── protocol.py
+│   │   ├── repository.py
+│   │   ├── segmentation.py
+│   │   ├── service.py
+│   │   ├── validation.py
+│   │   ├── pipeline.py
+│   │   ├── protection.py
+│   │   ├── analysis/
+│   │   │   ├── analyzer.py
+│   │   │   ├── models.py
+│   │   │   └── spans.py
+│   │   ├── extraction/
+│   │   │   ├── extractors.py
+│   │   │   ├── models.py
+│   │   │   └── runner.py
+│   │   └── storage/
+│   │       ├── fakes.py
+│   │       └── s3.py
 │   ├── domain/
 │   ├── llm/
+│   ├── outbound/
+│   │   ├── gateway.py
+│   │   ├── scan.py
+│   │   └── serialization.py
 │   ├── observability/
 │   ├── pipeline/
 │   ├── policy/
@@ -1105,17 +1456,19 @@ secure-ai-gateway/
 │   ├── restoration/
 │   ├── tokenization/
 │   └── vault/
+├── docs/
+│   └── adr/
 ├── migrations/
 ├── scripts/
 ├── tests/
+│   ├── fixtures/
 │   ├── unit/
 │   ├── integration/
 │   ├── privacy/
 │   ├── security/
 │   └── performance/
 └── deploy/
-    ├── compose/
-    └── kubernetes/
+    └── compose/
 ```
 
 ---

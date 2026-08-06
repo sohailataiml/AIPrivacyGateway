@@ -37,6 +37,12 @@ from app.domain.models import (
 REAL_KEY = base64.b64encode(bytes(range(32))).decode()
 STRONG_PEPPER = "p" * 48
 STRONG_AUDIT_KEY = base64.b64encode(bytes(range(1, 33))).decode()
+STRONG_METRICS_TOKEN = "m" * 48
+# A different key from the vault's: the two rings are separate by design,
+# and a test that used one value for both could not catch them being crossed.
+REAL_DOCUMENT_KEY = base64.b64encode(bytes(range(64, 96))).decode()
+STRONG_OBJECT_STORE_KEY_ID = "k" * 32
+STRONG_OBJECT_STORE_SECRET = "s" * 48
 
 
 def production_env(**overrides: str) -> dict[str, str]:
@@ -47,6 +53,15 @@ def production_env(**overrides: str) -> dict[str, str]:
         "AUDIT_HMAC_KEY": STRONG_AUDIT_KEY,
         "VAULT_ACTIVE_KEY_ID": "prod1",
         "VAULT_KEY_PROD1": REAL_KEY,
+        "METRICS_TOKEN": STRONG_METRICS_TOKEN,
+        # Documents are enabled by default, and production refuses to accept
+        # uploads it cannot protect or store. A "valid production environment"
+        # therefore has to include them.
+        "DOCUMENT_ACTIVE_KEY_ID": "prod1",
+        "DOCUMENT_KEY_PROD1": REAL_DOCUMENT_KEY,
+        "OBJECT_STORE_BUCKET": "sgw-documents",
+        "OBJECT_STORE_ACCESS_KEY_ID": STRONG_OBJECT_STORE_KEY_ID,
+        "OBJECT_STORE_SECRET_ACCESS_KEY": STRONG_OBJECT_STORE_SECRET,
     }
     env.update(overrides)
     return env
@@ -56,7 +71,9 @@ def production_env(**overrides: str) -> dict[str, str]:
 def isolated_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Run every settings test against a clean environment and no .env file."""
     for name in list(os.environ):
-        if name.startswith(("APP_", "VAULT_", "API_KEY_", "AUDIT_", "OPENAI_", "CORS_")):
+        if name.startswith(
+            ("APP_", "VAULT_", "API_KEY_", "AUDIT_", "OPENAI_", "CORS_", "METRICS_")
+        ):
             monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)
     get_settings.cache_clear()
@@ -165,6 +182,8 @@ class TestProductionHardening:
             ({"VAULT_KEY_PROD1": "not-base64!!"}, "base64"),
             ({"DIAGNOSTICS_RETURN_MATCHED_TEXT": "true"}, "DIAGNOSTICS"),
             ({"CORS_ALLOWED_ORIGINS": "*"}, "CORS"),
+            ({"METRICS_TOKEN": "change-me"}, "METRICS_TOKEN"),
+            ({"METRICS_TOKEN": "short"}, "METRICS_TOKEN"),
         ],
     )
     def test_invalid_production_configuration_prevents_startup(
@@ -202,6 +221,42 @@ class TestProductionHardening:
 
         assert settings.diagnostics_allowed is False
 
+    def test_production_refuses_an_unauthenticated_metrics_endpoint(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        env = production_env()
+        del env["METRICS_TOKEN"]
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+
+        with pytest.raises(ValueError, match="METRICS_TOKEN"):
+            Settings()
+
+    def test_production_allows_metrics_to_be_switched_off_entirely(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No endpoint needs no token. The rule is about what is exposed, not
+        about a variable being present."""
+        env = production_env(METRICS_ENABLED="false")
+        del env["METRICS_TOKEN"]
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+
+        settings = Settings()
+
+        assert settings.metrics_enabled is False
+        assert settings.metrics_token is None
+
+    def test_metrics_token_is_not_printed_by_repr(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name, value in production_env().items():
+            monkeypatch.setenv(name, value)
+
+        settings = Settings()
+
+        assert STRONG_METRICS_TOKEN not in repr(settings)
+        assert settings.metrics_token is not None
+        assert settings.metrics_token.get_secret_value() == STRONG_METRICS_TOKEN
+
     def test_local_defaults_use_the_mock_provider(self) -> None:
         settings = Settings()
 
@@ -230,6 +285,63 @@ class TestVaultKeyRing:
 
         with pytest.raises(ValueError, match="not present in the key ring"):
             settings.vault_key("nope")
+
+
+# ---------------------------------------------------------------------------
+# Shipped configuration files
+# ---------------------------------------------------------------------------
+class TestShippedKeyMaterial:
+    """Every key in a file the project ships must be the right length.
+
+    This class exists because `docker-compose.yml` shipped a document key that
+    decoded to 34 bytes. AES-256 needs exactly 32, so every upload against the
+    composed stack failed with a 503 and a reason code of `unknown_key_id` --
+    for a key that was present the whole time. Nothing in the suite read that
+    file, so nothing caught it until a document was pushed through a running
+    container.
+
+    A base64 blob that is *nearly* the right length is the perfect defect: it
+    looks correct, it parses, and it fails only at the moment of use.
+    """
+
+    ROOT = Path(__file__).resolve().parents[2]
+    KEY_PATTERN = re.compile(
+        r"^\s*(?:-\s*)?(?P<name>(?:VAULT_KEY|DOCUMENT_KEY)_[A-Z0-9]+)\s*[:=]\s*"
+        r"(?P<value>[A-Za-z0-9+/=]+)\s*$",
+        re.MULTILINE,
+    )
+
+    @pytest.mark.parametrize("filename", ["docker-compose.yml", ".env.example"])
+    def test_every_shipped_ring_key_decodes_to_32_bytes(self, filename: str) -> None:
+        # Arrange
+        text = (self.ROOT / filename).read_text(encoding="utf-8")
+        found = list(self.KEY_PATTERN.finditer(text))
+
+        # A pattern that matches nothing would make this test decorative.
+        assert found, f"{filename} declares no ring keys; has the pattern drifted?"
+
+        # Act / Assert
+        for match in found:
+            name, value = match.group("name"), match.group("value")
+            raw = base64.b64decode(value, validate=True)
+            assert len(raw) == 32, f"{filename}: {name} decodes to {len(raw)} bytes, not 32"
+
+    @pytest.mark.parametrize("filename", ["docker-compose.yml", ".env.example"])
+    def test_every_active_key_id_has_a_matching_key(self, filename: str) -> None:
+        # A ring whose active id names nothing fails the same way, and reads
+        # the same way in a diff.
+        text = (self.ROOT / filename).read_text(encoding="utf-8")
+        declared = {match.group("name") for match in self.KEY_PATTERN.finditer(text)}
+
+        for prefix in ("VAULT", "DOCUMENT"):
+            active = re.search(
+                rf"^\s*(?:-\s*)?{prefix}_ACTIVE_KEY_ID\s*[:=]\s*(?P<id>\S+)\s*$",
+                text,
+                re.MULTILINE,
+            )
+            assert active, f"{filename} sets no {prefix}_ACTIVE_KEY_ID"
+            expected = f"{prefix}_KEY_{active.group('id').upper()}"
+            assert expected in declared, f"{filename}: {prefix}_ACTIVE_KEY_ID names no key"
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     environment:
       APP_ENV: local
       APP_HOST: 0.0.0.0
@@ -33,6 +35,30 @@ services:
       VAULT_KEY_LOCAL1: bG9jYWwtY29tcG9zZS12YXVsdC1rZXktMzJieXRlcyE=
       AUDIT_HMAC_KEY: bG9jYWwtY29tcG9zZS1hdWRpdC1obWFjLTMyYnl0ZXMh
       DEFAULT_PROVIDER: mock
+
+      # The workspace in frontend/ runs on :3000 and calls this API from the
+      # browser. CORS is off by default and stays off in a deployment; the
+      # local origin is listed here so `docker compose up` plus `npm run dev`
+      # is a working pair without a manual step.
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
+      # Document storage (ADR-0020, ADR-0021, ADR-0027). The document key ring
+      # is separate from the vault's on purpose: the two protect data with
+      # different lifetimes and rotate on different schedules.
+      DOCUMENTS_ENABLED: "true"
+      DOCUMENT_ACTIVE_KEY_ID: local1
+      # 32 bytes exactly, base64. The first version of this line decoded to 34
+      # and every upload failed with a 503, because nothing in the test suite
+      # reads this file. tests/unit/test_contracts.py now does.
+      DOCUMENT_KEY_LOCAL1: bG9jYWwtY29tcG9zZS1kb2N1bWVudC1rZXktMzJieXQ=
+      OBJECT_STORE_ENDPOINT_URL: http://minio:9000
+      OBJECT_STORE_BUCKET: sgw-documents
+      OBJECT_STORE_ACCESS_KEY_ID: sgw-local-access-key
+      OBJECT_STORE_SECRET_ACCESS_KEY: sgw-local-secret-key-not-for-production
+      OBJECT_STORE_USE_PATH_STYLE: "true"
+      # Set even though APP_ENV=local would permit an open endpoint, so the
+      # scrape path this stack exercises is the same one a deployment uses.
+      METRICS_ENABLED: "true"
+      METRICS_TOKEN: local-compose-metrics-token-not-for-production-use
     ports:
       - "127.0.0.1:8000:8000"
     read_only: true
@@ -86,6 +112,44 @@ services:
       - "6379"
     restart: unless-stopped
 
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: sgw-local-access-key
+      MINIO_ROOT_PASSWORD: sgw-local-secret-key-not-for-production
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # The console is published for local inspection; the API is not, because
+    # only the gateway needs to reach it.
+    ports:
+      - "127.0.0.1:9001:9001"
+    expose:
+      - "9000"
+    restart: unless-stopped
+
+  minio-init:
+    # Bucket creation is part of bringing the stack up, not a manual click in a
+    # console (ADR-0027). Runs once, then exits; the gateway waits for it.
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/init/minio-init.sh"]
+    environment:
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: sgw-local-access-key
+      MINIO_ROOT_PASSWORD: sgw-local-secret-key-not-for-production
+      OBJECT_STORE_BUCKET: sgw-documents
+    volumes:
+      - ./deploy/compose/minio-init.sh:/init/minio-init.sh:ro
+    restart: "no"
+
   prometheus:
     image: prom/prometheus:latest
     volumes:
@@ -98,3 +162,4 @@ services:
 
 volumes:
   postgres-data:
+  minio-data:

@@ -12,6 +12,7 @@ log hygiene.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -22,6 +23,7 @@ import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from app.domain.errors import VaultEncryptionError, VaultUnavailableError
+from app.domain.models import VaultWriteRequest
 from app.tokenization.grammar import Token, format_token, parse_token
 from app.tokenization.ids import new_token_id
 from app.vault.crypto import (
@@ -36,7 +38,7 @@ from app.vault.fakes import InMemoryTokenVault
 from app.vault.keys import StaticKeyRing
 from app.vault.protocol import TokenVault
 from app.vault.records import VaultRecord
-from app.vault.redis_vault import DEFAULT_KEY_PREFIX, RedisTokenVault
+from app.vault.redis_vault import DEFAULT_KEY_PREFIX, MAX_BATCH_ENTRIES, RedisTokenVault
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -115,17 +117,52 @@ def aad(
     )
 
 
-async def store_email(vault: RedisTokenVault, **overrides: object) -> str:
-    kwargs: dict[str, object] = {
-        "tenant_id": TENANT,
-        "session_id": SESSION,
-        "entity_type": "EMAIL_ADDRESS",
-        "normalized_hmac": FINGERPRINT,
-        "original_value": EMAIL,
-        "ttl_seconds": TTL,
-    }
-    kwargs.update(overrides)
-    return await vault.get_or_create(**kwargs)  # type: ignore[arg-type]
+async def store_email(
+    vault: RedisTokenVault,
+    *,
+    tenant_id: UUID = TENANT,
+    session_id: UUID = SESSION,
+    entity_type: str = "EMAIL_ADDRESS",
+    normalized_hmac: str = FINGERPRINT,
+    original_value: str = EMAIL,
+    ttl_seconds: int = TTL,
+) -> str:
+    """Store one mapping through the batch API and return its token."""
+    tokens = await vault.get_or_create_many(
+        tenant_id=tenant_id,
+        session_id=session_id,
+        entries=(
+            VaultWriteRequest(
+                entity_type=entity_type,
+                normalized_hmac=normalized_hmac,
+                original_value=original_value,
+            ),
+        ),
+        ttl_seconds=ttl_seconds,
+    )
+    return tokens[0]
+
+
+def write_request(index: int) -> VaultWriteRequest:
+    """A distinct entry, for tests that care about batch shape rather than content."""
+    return VaultWriteRequest(
+        entity_type="EMAIL_ADDRESS",
+        normalized_hmac=f"{index:064d}",
+        original_value=f"user{index}@example.com",
+    )
+
+
+def break_script(monkeypatch: pytest.MonkeyPatch, redis_client: Redis, message: str) -> None:
+    """Make the batch write script unreachable.
+
+    Patching ``evalsha`` rather than the connection is what puts the failure
+    where the batch write actually happens.
+    """
+
+    def explode(*args: object, **kwargs: object) -> object:
+        raise RedisConnectionError(message)
+
+    monkeypatch.setattr(redis_client, "evalsha", explode)
 
 
 # ---------------------------------------------------------------------------
@@ -628,6 +665,391 @@ class TestRedisVaultBehaviour:
 
 
 # ---------------------------------------------------------------------------
+# Batch writes (ADR-0022)
+# ---------------------------------------------------------------------------
+class TestBatchWrites:
+    """The write path's half of ADR-0022.
+
+    The properties that matter are that the batch costs one round trip whatever
+    its size, that its result lines up with its input, and that batching did
+    not quietly cost the atomicity the single-token version had.
+    """
+
+    async def test_one_round_trip_regardless_of_batch_size(
+        self, vault: RedisTokenVault, redis_client: Redis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange -- count script invocations, which is what a round trip is
+        # for this operation. The first call of a process also pays a one-off
+        # NOSCRIPT reload, so warm that up before measuring anything.
+        invocations = 0
+        original = redis_client.evalsha
+
+        async def counting(*args: object, **kwargs: object) -> object:
+            nonlocal invocations
+            invocations += 1
+            return await original(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(redis_client, "evalsha", counting)
+        await vault.get_or_create_many(
+            tenant_id=TENANT,
+            session_id=OTHER_SESSION,
+            entries=(write_request(0),),
+            ttl_seconds=TTL,
+        )
+        invocations = 0
+
+        # Act
+        tokens = await vault.get_or_create_many(
+            tenant_id=TENANT,
+            session_id=SESSION,
+            entries=tuple(write_request(index) for index in range(40)),
+            ttl_seconds=TTL,
+        )
+
+        # Assert -- 40 mappings, one interaction. This is the assertion the
+        # per-token implementation could not pass: it made 40.
+        assert len(tokens) == 40
+        assert len(set(tokens)) == 40
+        assert invocations == 1
+
+    @pytest.mark.parametrize("size", [1, 5, 50])
+    async def test_round_trip_count_does_not_grow_with_the_batch(
+        self,
+        vault: RedisTokenVault,
+        redis_client: Redis,
+        monkeypatch: pytest.MonkeyPatch,
+        size: int,
+    ) -> None:
+        # Arrange
+        invocations = 0
+        original = redis_client.evalsha
+
+        async def counting(*args: object, **kwargs: object) -> object:
+            nonlocal invocations
+            invocations += 1
+            return await original(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(redis_client, "evalsha", counting)
+        await vault.get_or_create_many(
+            tenant_id=TENANT,
+            session_id=OTHER_SESSION,
+            entries=(write_request(0),),
+            ttl_seconds=TTL,
+        )
+        invocations = 0
+
+        # Act
+        await vault.get_or_create_many(
+            tenant_id=TENANT,
+            session_id=SESSION,
+            entries=tuple(write_request(index) for index in range(size)),
+            ttl_seconds=TTL,
+        )
+
+        # Assert -- the same cost at every size is the property, not the
+        # particular number.
+        assert invocations == 1
+
+    async def test_results_are_positionally_aligned_with_entries(
+        self, vault: RedisTokenVault
+    ) -> None:
+        # Arrange
+        entries = tuple(write_request(index) for index in range(5))
+
+        # Act
+        tokens = await vault.get_or_create_many(
+            tenant_id=TENANT, session_id=SESSION, entries=entries, ttl_seconds=TTL
+        )
+        resolved = await vault.resolve_many(
+            tenant_id=TENANT, session_id=SESSION, tokens=set(tokens)
+        )
+
+        # Assert -- entry i's token resolves to entry i's value, not a
+        # neighbour's.
+        for entry, token in zip(entries, tokens, strict=True):
+            assert resolved[token] == entry.original_value
+
+    async def test_a_value_repeated_in_one_batch_collapses_onto_one_token(
+        self, vault: RedisTokenVault, redis_client: Redis
+    ) -> None:
+        # Arrange -- the same fingerprint five times, as a value repeated in
+        # one message produces.
+        entries = tuple(write_request(1) for _ in range(5))
+
+        # Act
+        tokens = await vault.get_or_create_many(
+            tenant_id=TENANT, session_id=SESSION, entries=entries, ttl_seconds=TTL
+        )
+
+        # Assert -- one token, one record, five positions.
+        assert len(tokens) == 5
+        assert len(set(tokens)) == 1
+        record_keys = await redis_client.keys(f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:*")
+        assert len(record_keys) == 1
+
+    async def test_a_repeat_across_batches_reuses_the_first_token(
+        self, vault: RedisTokenVault
+    ) -> None:
+        # Arrange
+        entries = (write_request(1), write_request(2))
+
+        # Act
+        first = await vault.get_or_create_many(
+            tenant_id=TENANT, session_id=SESSION, entries=entries, ttl_seconds=TTL
+        )
+        second = await vault.get_or_create_many(
+            tenant_id=TENANT, session_id=SESSION, entries=entries, ttl_seconds=TTL
+        )
+
+        # Assert
+        assert first == second
+
+    async def test_a_batch_mixes_reuse_and_creation_correctly(self, vault: RedisTokenVault) -> None:
+        # Arrange -- one entry already stored, one brand new.
+        known = write_request(1)
+        (existing,) = await vault.get_or_create_many(
+            tenant_id=TENANT, session_id=SESSION, entries=(known,), ttl_seconds=TTL
+        )
+
+        # Act
+        tokens = await vault.get_or_create_many(
+            tenant_id=TENANT,
+            session_id=SESSION,
+            entries=(write_request(2), known, write_request(3)),
+            ttl_seconds=TTL,
+        )
+
+        # Assert
+        assert tokens[1] == existing
+        assert tokens[0] != existing
+        assert tokens[2] != existing
+
+    async def test_an_empty_batch_touches_redis_not_at_all(
+        self, vault: RedisTokenVault, redis_client: Redis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        break_script(monkeypatch, redis_client, "should not be called")
+
+        # Act
+        tokens = await vault.get_or_create_many(
+            tenant_id=TENANT, session_id=SESSION, entries=(), ttl_seconds=TTL
+        )
+
+        # Assert
+        assert tokens == ()
+
+    async def test_every_key_in_a_batch_carries_a_ttl(
+        self, vault: RedisTokenVault, redis_client: Redis
+    ) -> None:
+        # Arrange / Act
+        await vault.get_or_create_many(
+            tenant_id=TENANT,
+            session_id=SESSION,
+            entries=tuple(write_request(index) for index in range(6)),
+            ttl_seconds=TTL,
+        )
+
+        # Assert -- records, indexes, and the meta set alike. A key without a
+        # TTL is a mapping that outlives its session.
+        keys = await redis_client.keys(f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:*")
+        assert keys
+        for key in keys:
+            assert await redis_client.ttl(key) > 0
+
+    async def test_reuse_within_a_batch_refreshes_the_existing_ttl(
+        self, vault: RedisTokenVault, redis_client: Redis
+    ) -> None:
+        # Arrange
+        entry = write_request(1)
+        await vault.get_or_create_many(
+            tenant_id=TENANT, session_id=SESSION, entries=(entry,), ttl_seconds=60
+        )
+
+        # Act
+        await vault.get_or_create_many(
+            tenant_id=TENANT, session_id=SESSION, entries=(entry,), ttl_seconds=600
+        )
+
+        # Assert
+        record_keys = await redis_client.keys(f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:*")
+        assert len(record_keys) == 1
+        assert await redis_client.ttl(record_keys[0]) > 60
+
+    async def test_a_failed_batch_writes_nothing_at_all(
+        self, redis_client: Redis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange -- sealing fails on the way in, as a key-manager outage would
+        # make it.
+        broken = RedisTokenVault(redis_client, EnvelopeCipher(_UnavailableKeyRing()))
+
+        # Act
+        with pytest.raises(VaultEncryptionError):
+            await broken.get_or_create_many(
+                tenant_id=TENANT,
+                session_id=SESSION,
+                entries=tuple(write_request(index) for index in range(4)),
+                ttl_seconds=TTL,
+            )
+
+        # Assert -- no partial batch left behind.
+        assert await redis_client.keys(f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:*") == []
+
+    async def test_an_unreachable_redis_fails_a_batch_closed(
+        self, vault: RedisTokenVault, redis_client: Redis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        break_script(monkeypatch, redis_client, "connection refused")
+
+        # Act / Assert -- never a partial tuple the caller could mistake for
+        # success.
+        with pytest.raises(VaultUnavailableError):
+            await vault.get_or_create_many(
+                tenant_id=TENANT,
+                session_id=SESSION,
+                entries=tuple(write_request(index) for index in range(3)),
+                ttl_seconds=TTL,
+            )
+
+    async def test_a_batch_beyond_the_ceiling_is_refused(self, vault: RedisTokenVault) -> None:
+        # Arrange
+        entries = tuple(write_request(index) for index in range(MAX_BATCH_ENTRIES + 1))
+
+        # Act / Assert
+        with pytest.raises(ValueError, match="ceiling"):
+            await vault.get_or_create_many(
+                tenant_id=TENANT, session_id=SESSION, entries=entries, ttl_seconds=TTL
+            )
+
+    async def test_a_hostile_entity_type_is_refused_before_any_write(
+        self, vault: RedisTokenVault, redis_client: Redis
+    ) -> None:
+        # Arrange -- the bad entry sits behind a good one, so a per-entry
+        # validation loop would already have written the first.
+        entries = (
+            write_request(1),
+            VaultWriteRequest(
+                entity_type="EMAIL:../../other",
+                normalized_hmac="b" * 64,
+                original_value="x@example.com",
+            ),
+        )
+
+        # Act
+        with pytest.raises(ValueError):
+            await vault.get_or_create_many(
+                tenant_id=TENANT, session_id=SESSION, entries=entries, ttl_seconds=TTL
+            )
+
+        # Assert
+        assert await redis_client.keys(f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:*") == []
+
+    async def test_a_stale_index_entry_is_replaced_rather_than_returned(
+        self, vault: RedisTokenVault, redis_client: Redis
+    ) -> None:
+        # Arrange -- delete the record but leave its index behind, which is
+        # what an evicted or expired record looks like.
+        entry = write_request(1)
+        (first,) = await vault.get_or_create_many(
+            tenant_id=TENANT, session_id=SESSION, entries=(entry,), ttl_seconds=TTL
+        )
+        record_keys = await redis_client.keys(f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:*")
+        await redis_client.delete(*record_keys)
+
+        # Act
+        (second,) = await vault.get_or_create_many(
+            tenant_id=TENANT, session_id=SESSION, entries=(entry,), ttl_seconds=TTL
+        )
+
+        # Assert -- a fresh token that resolves, not the orphan.
+        assert second != first
+        assert await vault.resolve_many(tenant_id=TENANT, session_id=SESSION, tokens={second}) == {
+            second: entry.original_value
+        }
+
+    async def test_concurrent_overlapping_batches_agree_on_every_token(
+        self, vault: RedisTokenVault, redis_client: Redis
+    ) -> None:
+        # Arrange -- eight callers writing the same eight fingerprints at once,
+        # which is the race the single-token version used WATCH to survive.
+        entries = tuple(write_request(index) for index in range(8))
+
+        # Act
+        results = await asyncio.gather(
+            *[
+                vault.get_or_create_many(
+                    tenant_id=TENANT, session_id=SESSION, entries=entries, ttl_seconds=TTL
+                )
+                for _ in range(8)
+            ]
+        )
+
+        # Assert -- every caller got identical tokens, and only eight records
+        # exist.
+        assert len({tuple(result) for result in results}) == 1
+        record_keys = await redis_client.keys(f"{DEFAULT_KEY_PREFIX}:{TENANT}:{SESSION}:token:*")
+        assert len(record_keys) == 8
+
+    async def test_batches_in_two_sessions_do_not_share_tokens(
+        self, vault: RedisTokenVault
+    ) -> None:
+        # Arrange
+        entries = tuple(write_request(index) for index in range(4))
+
+        # Act
+        here = await vault.get_or_create_many(
+            tenant_id=TENANT, session_id=SESSION, entries=entries, ttl_seconds=TTL
+        )
+        there = await vault.get_or_create_many(
+            tenant_id=TENANT, session_id=OTHER_SESSION, entries=entries, ttl_seconds=TTL
+        )
+
+        # Assert
+        assert set(here).isdisjoint(there)
+        assert (
+            await vault.resolve_many(tenant_id=TENANT, session_id=OTHER_SESSION, tokens=set(here))
+            == {}
+        )
+
+    async def test_a_malformed_script_reply_fails_closed(
+        self, vault: RedisTokenVault, redis_client: Redis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange -- a reply shorter than the batch, which would otherwise pair
+        # spans with other spans' tokens.
+        async def truncated(*args: object, **kwargs: object) -> list[object]:
+            return [b"01J8Z6J4M7Y9Q2K3T4V5W6X7Y8", 1]
+
+        monkeypatch.setattr(redis_client, "evalsha", truncated)
+
+        # Act / Assert
+        with pytest.raises(VaultEncryptionError):
+            await vault.get_or_create_many(
+                tenant_id=TENANT,
+                session_id=SESSION,
+                entries=(write_request(1), write_request(2)),
+                ttl_seconds=TTL,
+            )
+
+    async def test_a_malformed_token_id_from_the_index_fails_closed(
+        self, vault: RedisTokenVault, redis_client: Redis, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange
+        async def garbage(*args: object, **kwargs: object) -> list[object]:
+            return [b"not-a-token-id", 0]
+
+        monkeypatch.setattr(redis_client, "evalsha", garbage)
+
+        # Act / Assert -- better to fail than to hand back a token that cannot
+        # resolve.
+        with pytest.raises(VaultEncryptionError):
+            await vault.get_or_create_many(
+                tenant_id=TENANT,
+                session_id=SESSION,
+                entries=(write_request(1),),
+                ttl_seconds=TTL,
+            )
+
+
+# ---------------------------------------------------------------------------
 # Session deletion
 # ---------------------------------------------------------------------------
 class TestSessionDeletion:
@@ -930,10 +1352,7 @@ class TestVaultSecurity:
         self, vault: RedisTokenVault, redis_client: Redis, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
-        def explode(*args: object, **kwargs: object) -> object:
-            raise RedisConnectionError("connection refused")
-
-        monkeypatch.setattr(redis_client, "transaction", explode)
+        break_script(monkeypatch, redis_client, "connection refused")
 
         # Act / Assert
         with pytest.raises(VaultUnavailableError):
@@ -972,10 +1391,7 @@ class TestVaultSecurity:
         self, vault: RedisTokenVault, redis_client: Redis, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Arrange
-        def explode(*args: object, **kwargs: object) -> object:
-            raise RedisConnectionError("redis://secret-host:6379 connection refused")
-
-        monkeypatch.setattr(redis_client, "transaction", explode)
+        break_script(monkeypatch, redis_client, "redis://secret-host:6379 connection refused")
 
         # Act
         with pytest.raises(VaultUnavailableError) as caught:
@@ -995,14 +1411,7 @@ class TestVaultSecurity:
 
         # Act
         with pytest.raises(VaultEncryptionError):
-            await broken.get_or_create(
-                tenant_id=TENANT,
-                session_id=SESSION,
-                entity_type="EMAIL_ADDRESS",
-                normalized_hmac=FINGERPRINT,
-                original_value=EMAIL,
-                ttl_seconds=TTL,
-            )
+            await store_email(broken)
 
         # Assert
         assert caplog.records
@@ -1067,6 +1476,38 @@ class TestInMemoryTokenVault:
     def test_satisfies_the_token_vault_protocol(self) -> None:
         # Act / Assert
         assert isinstance(InMemoryTokenVault(), TokenVault)
+
+    def test_exposes_the_same_write_signature_as_the_real_vault(self) -> None:
+        # Arrange -- ``runtime_checkable`` only checks that a name exists, so
+        # it would not notice the fake keeping an older parameter list. A fake
+        # that drifts from the real vault is how a green suite hides a broken
+        # wiring path.
+        real = inspect.signature(RedisTokenVault.get_or_create_many)
+        fake = inspect.signature(InMemoryTokenVault.get_or_create_many)
+
+        # Act / Assert
+        assert list(real.parameters) == list(fake.parameters)
+
+    def test_offers_no_single_token_write(self) -> None:
+        # Arrange / Act / Assert -- ADR-0022 has no per-token write, and a
+        # helpfully reinstated one is how the loop would come back.
+        assert not hasattr(InMemoryTokenVault(), "get_or_create")
+        assert not hasattr(RedisTokenVault, "get_or_create")
+
+    async def test_duplicates_within_one_batch_collapse(self) -> None:
+        # Arrange
+        fake = InMemoryTokenVault()
+        entries = tuple(write_request(1) for _ in range(4))
+
+        # Act
+        tokens = await fake.get_or_create_many(
+            tenant_id=TENANT, session_id=SESSION, entries=entries, ttl_seconds=TTL
+        )
+
+        # Assert -- the same collapse the Redis implementation performs.
+        assert len(tokens) == 4
+        assert len(set(tokens)) == 1
+        assert fake.stored_original_values() == ["user1@example.com"]
 
     async def test_stores_and_resolves_a_mapping(self) -> None:
         # Arrange
@@ -1179,15 +1620,15 @@ class TestVaultMetrics:
 
     async def test_operation_latency_is_observed(self, vault: RedisTokenVault) -> None:
         # Arrange
-        from app.vault.metrics import OPERATION_GET_OR_CREATE, VAULT_OPERATION_SECONDS
+        from app.vault.metrics import OPERATION_GET_OR_CREATE_MANY, VAULT_OPERATION_SECONDS
 
-        before = VAULT_OPERATION_SECONDS.labels(operation=OPERATION_GET_OR_CREATE)._sum.get()
+        before = VAULT_OPERATION_SECONDS.labels(operation=OPERATION_GET_OR_CREATE_MANY)._sum.get()
 
         # Act
         await store_email(vault)
 
         # Assert
-        after = VAULT_OPERATION_SECONDS.labels(operation=OPERATION_GET_OR_CREATE)._sum.get()
+        after = VAULT_OPERATION_SECONDS.labels(operation=OPERATION_GET_OR_CREATE_MANY)._sum.get()
         assert after >= before
 
     async def test_an_outage_is_counted_as_unavailable_not_as_success(
@@ -1195,20 +1636,17 @@ class TestVaultMetrics:
     ) -> None:
         # Arrange
         from app.vault.metrics import (
-            OPERATION_GET_OR_CREATE,
+            OPERATION_GET_OR_CREATE_MANY,
             OUTCOME_UNAVAILABLE,
             VAULT_OPERATIONS_TOTAL,
         )
 
         counter = VAULT_OPERATIONS_TOTAL.labels(
-            operation=OPERATION_GET_OR_CREATE, outcome=OUTCOME_UNAVAILABLE
+            operation=OPERATION_GET_OR_CREATE_MANY, outcome=OUTCOME_UNAVAILABLE
         )
         before = counter._value.get()
 
-        def explode(*args: object, **kwargs: object) -> object:
-            raise RedisConnectionError("down")
-
-        monkeypatch.setattr(redis_client, "transaction", explode)
+        break_script(monkeypatch, redis_client, "down")
 
         # Act
         with pytest.raises(VaultUnavailableError):

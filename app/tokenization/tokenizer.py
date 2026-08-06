@@ -6,10 +6,16 @@ Order of operations is a safety property, not a style choice:
 2. Enforce the entity limit -- before any vault write.
 3. Reject the whole request if any span is ``BLOCK`` -- before any vault write,
    and long before a provider could be called.
-4. Only then walk the spans right to left, minting or reusing tokens.
+4. Mint or reuse every mapping the message needs in **one** vault call.
+5. Only then splice the text, right to left.
 
 Steps 2 and 3 come first so that a request destined to fail leaves nothing
 behind: no mapping in the vault, no ciphertext, no TTL to wait out.
+
+Step 4 is one call rather than one per span (ADR-0022). Vault latency is
+dominated by round trips, so a per-span call made the cost of protecting a
+message linear in its entity count -- fine for a sentence, fatal for a document.
+Minting has no ordering requirement between spans; only splicing does.
 
 Replacement runs right to left because every offset in ``DetectedEntity`` indexes
 the *original* string. Splicing from the left would shift every later span by the
@@ -18,7 +24,9 @@ span is spliced while its offsets are still valid.
 
 Nothing in this module logs. The values passing through are exactly the ones the
 gateway exists to protect, and the cheapest way to guarantee they are never
-logged is to have no logging statements at all.
+logged is to have no logging statements at all. The one observability call it
+does make, :func:`app.tokenization.metrics.record_plan`, is handed entity types
+and policy actions -- never the text of a span.
 """
 
 from __future__ import annotations
@@ -41,7 +49,9 @@ from app.domain.models import (
     EntityMapping,
     PrivacySummary,
     TransformedText,
+    VaultWriteRequest,
 )
+from app.tokenization import metrics
 from app.tokenization.fingerprint import Fingerprinter
 from app.tokenization.grammar import Token, format_redaction, is_valid_token_id, parse_token
 from app.tokenization.normalization import normalize
@@ -53,11 +63,20 @@ _MAPPING_ACTIONS: Final = frozenset({EntityAction.TOKENIZE, EntityAction.PSEUDON
 
 
 @dataclass(frozen=True, slots=True)
-class _Outcome:
-    """What one span turned into. ``replacement`` is ``None`` when text is left as is."""
+class _Pending:
+    """A span awaiting a token, and where it sits in the plan.
 
-    replacement: str | None
-    mapping: EntityMapping | None
+    Carries an original value, so like ``EntityMapping`` it must never be
+    logged; the custom ``__repr__`` is what makes a stray traceback safe.
+    """
+
+    index: int
+    original: str
+    entity_type: str
+    normalized_hmac: str
+
+    def __repr__(self) -> str:
+        return f"_Pending(index={self.index}, entity_type={self.entity_type!r})"
 
 
 class Tokenizer:
@@ -96,28 +115,42 @@ class Tokenizer:
         selected = select_entities(text=text, entities=entities, policy=policy)
         self._enforce_limit(selected, policy)
         plan = tuple((entity, policy.action_for(entity.entity_type)) for entity in selected)
+        # Before the block check, so a blocked span is counted rather than
+        # vanishing along with the request it stopped. Type names and decision
+        # names only -- see app.tokenization.metrics.
+        metrics.record_plan(plan)
         _reject_blocked(plan)
+
+        # Every vault write for this message, in one call, before any splicing.
+        minted = await self._mint(
+            tenant_id=tenant_id,
+            session_id=session_id,
+            text=text,
+            plan=plan,
+            ttl_seconds=policy.session_ttl_seconds,
+        )
 
         pieces: list[str] = []
         mappings: list[EntityMapping] = []
         cursor = len(text)
 
         # Right to left: every span is spliced while its offsets still hold.
-        for entity, action in sorted(plan, key=lambda item: item[0].start, reverse=True):
-            outcome = await self._apply(
-                tenant_id=tenant_id,
-                session_id=session_id,
-                original=text[entity.start : entity.end],
+        order = sorted(range(len(plan)), key=lambda index: plan[index][0].start, reverse=True)
+        for index in order:
+            entity, action = plan[index]
+            mapping = minted.get(index)
+            if mapping is not None:
+                mappings.append(mapping)
+            replacement = _replacement_for(
+                action,
                 entity_type=entity.entity_type,
-                action=action,
-                ttl_seconds=policy.session_ttl_seconds,
+                mapping=mapping,
+                original=text[entity.start : entity.end],
             )
-            if outcome.mapping is not None:
-                mappings.append(outcome.mapping)
-            if outcome.replacement is None:
+            if replacement is None:
                 continue
             pieces.append(text[entity.end : cursor])
-            pieces.append(outcome.replacement)
+            pieces.append(replacement)
             cursor = entity.start
         pieces.append(text[:cursor])
 
@@ -135,58 +168,121 @@ class Tokenizer:
             log_context={"entity_count": len(selected), "max_entities": policy.max_entities}
         )
 
-    async def _apply(
+    async def _mint(
         self,
         *,
         tenant_id: UUID,
         session_id: UUID,
-        original: str,
-        entity_type: str,
-        action: EntityAction,
+        text: str,
+        plan: Sequence[tuple[DetectedEntity, EntityAction]],
         ttl_seconds: int,
-    ) -> _Outcome:
-        """Resolve one span into its replacement text and optional mapping."""
-        if action is EntityAction.ALLOW:
-            return _Outcome(replacement=None, mapping=None)
-        if action is EntityAction.REDACT:
-            # No vault call: a redaction is intentionally not reversible.
-            return _Outcome(replacement=format_redaction(entity_type), mapping=None)
-        if action not in _MAPPING_ACTIONS:  # pragma: no cover - blocked earlier
-            raise AssertionError("unexpected action reached the replacement stage")
+    ) -> dict[int, EntityMapping]:
+        """Create every mapping this message needs, keyed by index into ``plan``.
 
-        normalized = normalize(entity_type, original)
-        normalized_hmac = self._fingerprinter.fingerprint(
-            tenant_id=tenant_id,
-            session_id=session_id,
-            entity_type=entity_type,
-            normalized_value=normalized,
+        Spans whose action needs no mapping -- ``ALLOW`` and ``REDACT``, the
+        latter being deliberately irreversible -- are absent from the result and
+        never reach the vault.
+        """
+        pending = tuple(
+            self._pending_for(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                index=index,
+                original=text[entity.start : entity.end],
+                entity_type=entity.entity_type,
+            )
+            for index, (entity, action) in enumerate(plan)
+            if action in _MAPPING_ACTIONS
         )
-        raw_token = await self._vault.get_or_create(
+        if not pending:
+            return {}
+
+        tokens = await self._vault.get_or_create_many(
             tenant_id=tenant_id,
             session_id=session_id,
-            entity_type=entity_type,
-            normalized_hmac=normalized_hmac,
-            original_value=original,
+            entries=tuple(
+                VaultWriteRequest(
+                    entity_type=item.entity_type,
+                    normalized_hmac=item.normalized_hmac,
+                    original_value=item.original,
+                )
+                for item in pending
+            ),
             ttl_seconds=ttl_seconds,
         )
-        token = _coerce_vault_token(raw_token, entity_type)
-        mapping = EntityMapping(
-            token=token.text,
-            token_id=token.token_id,
+        if len(tokens) != len(pending):
+            # The result is positional; a length mismatch would silently pair
+            # spans with other spans' tokens.
+            raise GatewayError(
+                code=ErrorCode.INTERNAL_ERROR,
+                log_context={
+                    "reason": "vault returned the wrong number of tokens",
+                    "expected": len(pending),
+                    "received": len(tokens),
+                },
+            )
+
+        return {
+            item.index: _mapping_for(item, raw_token)
+            for item, raw_token in zip(pending, tokens, strict=True)
+        }
+
+    def _pending_for(
+        self,
+        *,
+        tenant_id: UUID,
+        session_id: UUID,
+        index: int,
+        original: str,
+        entity_type: str,
+    ) -> _Pending:
+        normalized = normalize(entity_type, original)
+        return _Pending(
+            index=index,
+            original=original,
             entity_type=entity_type,
-            original_value=original,
-            normalized_hmac=normalized_hmac,
+            normalized_hmac=self._fingerprinter.fingerprint(
+                tenant_id=tenant_id,
+                session_id=session_id,
+                entity_type=entity_type,
+                normalized_value=normalized,
+            ),
         )
 
-        if action is EntityAction.PSEUDONYMIZE:
-            replacement = surrogate_for(
-                entity_type=entity_type,
-                original_value=original,
-                fingerprint=normalized_hmac,
-            )
-        else:
-            replacement = token.text
-        return _Outcome(replacement=replacement, mapping=mapping)
+
+def _mapping_for(item: _Pending, raw_token: str) -> EntityMapping:
+    token = _coerce_vault_token(raw_token, item.entity_type)
+    return EntityMapping(
+        token=token.text,
+        token_id=token.token_id,
+        entity_type=item.entity_type,
+        original_value=item.original,
+        normalized_hmac=item.normalized_hmac,
+    )
+
+
+def _replacement_for(
+    action: EntityAction,
+    *,
+    entity_type: str,
+    mapping: EntityMapping | None,
+    original: str,
+) -> str | None:
+    """Return the text that replaces a span, or ``None`` to leave it alone."""
+    if action is EntityAction.ALLOW:
+        return None
+    if action is EntityAction.REDACT:
+        # No vault call: a redaction is intentionally not reversible.
+        return format_redaction(entity_type)
+    if mapping is None:  # pragma: no cover - every mapping action was minted
+        raise AssertionError("a mapping action reached replacement without a mapping")
+    if action is EntityAction.PSEUDONYMIZE:
+        return surrogate_for(
+            entity_type=entity_type,
+            original_value=original,
+            fingerprint=mapping.normalized_hmac,
+        )
+    return mapping.token
 
 
 def _reject_blocked(plan: Sequence[tuple[DetectedEntity, EntityAction]]) -> None:

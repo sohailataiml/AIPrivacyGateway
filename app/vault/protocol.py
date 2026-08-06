@@ -13,33 +13,51 @@ Protocol and never on ``RedisTokenVault``. Two properties are contractual:
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import UUID
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from app.domain.models import VaultWriteRequest
 
 
 @runtime_checkable
 class TokenVault(Protocol):
-    """Stores and resolves short-lived encrypted token mappings."""
+    """Stores and resolves short-lived encrypted token mappings.
 
-    async def get_or_create(
+    Both directions are batched, per ADR-0022: the number of round trips an
+    implementation makes does not vary with the number of tokens. There is
+    deliberately no single-token write method, because the only way to use one
+    for a request carrying many entities is a loop.
+    """
+
+    async def get_or_create_many(
         self,
         *,
         tenant_id: UUID,
         session_id: UUID,
-        entity_type: str,
-        normalized_hmac: str,
-        original_value: str,
+        entries: Sequence[VaultWriteRequest],
         ttl_seconds: int,
-    ) -> str:
-        """Return the token for ``original_value`` within this session.
+    ) -> tuple[str, ...]:
+        """Return one token per entry, minting what does not already exist.
 
-        Repeated calls with the same ``normalized_hmac`` return the same token,
-        including under concurrency. Returns the full token string, e.g.
+        The result is positionally aligned with ``entries``. Each token is the
+        full token string, e.g.
         ``⟦SGW:EMAIL_ADDRESS:01J8Z6J4M7Y9Q2K3T4V5W6X7Y8⟧``.
+
+        Entries repeating the same ``entity_type`` and ``normalized_hmac``
+        receive the same token, and so do repeated calls -- including when two
+        requests race. That is what makes a value appearing twice in one prompt
+        collapse onto one token.
+
+        The batch is all-or-nothing from the caller's point of view: either
+        every returned token has a stored, resolvable mapping, or the call
+        raises. A partial result is never returned as success.
 
         Raises:
             VaultUnavailableError: the backing store could not be reached.
-            VaultEncryptionError: the record could not be sealed.
+            VaultEncryptionError: a record could not be sealed.
         """
         ...
 

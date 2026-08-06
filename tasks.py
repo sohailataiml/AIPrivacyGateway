@@ -32,6 +32,15 @@ TASKS: dict[str, tuple[list[str], ...]] = {
     "test": (["uv", "run", "pytest", "tests/unit"],),
     "test-integration": (["uv", "run", "pytest", "tests/integration", "-m", "integration"],),
     "test-privacy": (["uv", "run", "pytest", "tests/privacy", "-m", "privacy"],),
+    "test-e2e": (
+        [
+            "uv",
+            "run",
+            "pytest",
+            "tests/privacy/test_document_workflow.py",
+            "tests/privacy/test_outbound_conformance.py",
+        ],
+    ),
     "test-security": (["uv", "run", "pytest", "tests/security", "-m", "security"],),
     "coverage": (
         [
@@ -66,6 +75,14 @@ TASKS: dict[str, tuple[list[str], ...]] = {
     "migrate": (["uv", "run", "alembic", "upgrade", "head"],),
     "seed": (["uv", "run", "python", "-m", "scripts.seed_local"],),
     "compose-up": (["docker", "compose", "up", "--build", "-d"],),
+    # Run inside the stack: the compose database publishes no host port, so the
+    # host-run "migrate" and "seed" targets above cannot reach it.
+    "compose-migrate": (
+        ["docker", "compose", "run", "--rm", "gateway", "alembic", "upgrade", "head"],
+    ),
+    "compose-seed": (
+        ["docker", "compose", "run", "--rm", "gateway", "python", "-m", "scripts.seed_local"],
+    ),
     "compose-down": (["docker", "compose", "down", "-v"],),
 }
 

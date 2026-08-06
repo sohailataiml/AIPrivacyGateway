@@ -71,6 +71,8 @@ ALLOWED_FIELD_NAMES: Final[frozenset[str]] = frozenset(
         "error_code",
         "prompt_hmac",
         "response_hmac",
+        "outbound_hmac",
+        "outbound_scan",
     }
 )
 """Every field ``AuditRecord`` is permitted to declare.
@@ -134,6 +136,22 @@ class AuditRecord:
     error_code: str | None = None
     prompt_hmac: str | None = None
     response_hmac: str | None = None
+    outbound_hmac: str | None = None
+    """Keyed digest of the exact bytes handed to the provider (ADR-0024).
+
+    Not named ``payload_hmac``: ``PROHIBITED_FIELD_SUBSTRINGS`` rejects
+    ``payload``, and the screen is right to. What is stored is a digest of a
+    payload, never a payload, and the field name should not invite the second
+    reading.
+    """
+
+    outbound_scan: str | None = None
+    """What the pre-transmission scan concluded: ``clean`` or ``blocked``.
+
+    Recorded on both paths. A request stopped by the scan is the case most
+    worth auditing, and a row with a digest but no verdict would prove only
+    that something was assembled.
+    """
 
     def __post_init__(self) -> None:
         if not MIN_STATUS_CODE <= self.status_code <= MAX_STATUS_CODE:
@@ -156,6 +174,8 @@ class AuditRecord:
         _require_digest(self.session_id_hash, "session_id_hash", maximum=MAX_KEY_CHARS)
         _require_digest(self.prompt_hmac, "prompt_hmac")
         _require_digest(self.response_hmac, "response_hmac")
+        _require_digest(self.outbound_hmac, "outbound_hmac")
+        _require_code(self.outbound_scan, "outbound_scan", MAX_CODE_CHARS)
 
         # Normalize to plain dicts so the record owns its own copies and a
         # caller cannot mutate a queued event after submitting it.

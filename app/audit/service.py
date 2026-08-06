@@ -116,6 +116,8 @@ def to_draft(record: AuditRecord) -> AuditEventDraft:
         error_code=record.error_code,
         prompt_hmac=record.prompt_hmac,
         response_hmac=record.response_hmac,
+        outbound_hmac=record.outbound_hmac,
+        outbound_scan=record.outbound_scan,
     )
 
 

@@ -19,11 +19,13 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -226,6 +228,65 @@ class ProviderConfig(Base):
         return value
 
 
+class Document(Base):
+    """Metadata for one uploaded document. Never its contents.
+
+    Prohibited by construction, per ADR-0020: there is no column for document
+    bytes and none for extracted text. The bytes live in object storage, sealed
+    (ADR-0021), and this row holds only what is needed to find, describe, and
+    authorize them.
+
+    ``filename_ciphertext`` is the one encrypted column. A filename is
+    Restricted -- "Jane Doe MRI results.pdf" identifies a person and a condition
+    before the file is opened -- so it is sealed under the same per-document key
+    as the body and is unreadable without it.
+
+    ``storage_key`` is opaque: no tenant, no user, no filename, no extension.
+    Reading it from a bucket listing reveals nothing about whose document it is.
+    """
+
+    __tablename__ = "documents"
+
+    id: Mapped[UUID] = mapped_column(Uuid(), primary_key=True, default=uuid4)
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[UUID] = mapped_column(Uuid(), nullable=False)
+    """The authenticated subject the document is bound to (ADR-0021).
+
+    Today that is the API key id, because the gateway authenticates keys rather
+    than people. When a user model arrives this column is where it lands, and
+    the cryptographic binding already depends on it.
+    """
+
+    storage_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    filename_ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    content_type: Mapped[str] = mapped_column(String(128), nullable=False)
+    byte_size: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    """Plaintext length. The stored object is larger by the per-chunk overhead."""
+
+    sha256_hex: Mapped[str] = mapped_column(String(64), nullable=False)
+    """Checksum of the plaintext, for integrity verification on retrieval."""
+
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="receiving", server_default="receiving"
+    )
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        UtcDateTime, nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+    __table_args__ = (
+        # Every read is scoped by tenant and user, so that is the index.
+        Index("ix_documents_tenant_id_user_id", "tenant_id", "user_id"),
+        CheckConstraint(
+            "status IN ('receiving', 'stored', 'failed')",
+            name="status_known",
+        ),
+        CheckConstraint("byte_size >= 0", name="byte_size_non_negative"),
+    )
+
+
 class AuditEvent(Base):
     """A privacy-safe record of one gateway request.
 
@@ -272,6 +333,8 @@ class AuditEvent(Base):
     provider_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pipeline_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    outbound_hmac: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    outbound_scan: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     prompt_hmac: Mapped[str | None] = mapped_column(Text, nullable=True)
     response_hmac: Mapped[str | None] = mapped_column(Text, nullable=True)

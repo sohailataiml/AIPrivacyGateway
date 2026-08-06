@@ -1,0 +1,178 @@
+# Render blueprint: API, workspace, Postgres, Key Value, and self-hosted MinIO.
+#
+# The object store is a **private service** with a persistent disk rather than a
+# managed bucket. It gets an internal hostname, is reachable only by the other
+# services in this blueprint, and is never published to the internet — which is
+# the same posture ADR-0027 gives it in compose, moved to a host.
+#
+# Two consequences of that choice, stated because they are easy to discover late:
+#
+#   * A persistent disk pins the object store to **one instance**. It cannot be
+#     scaled horizontally, and a restart is a brief outage for document reads.
+#     Acceptable for a demo; it is not a highly available store.
+#   * Disks are a paid feature on Render. Verify your plan includes one before
+#     relying on this file.
+#
+# Every secret is `sync: false`, meaning Render prompts for it and it never
+# appears in this repository. Generate them with:
+#
+#     python -m scripts.generate_deploy_secrets
+#
+# and check them before deploying with:
+#
+#     python -m scripts.check_deploy_config
+#
+# The second one matters. `Settings` refuses to build under APP_ENV=production
+# if a secret is a placeholder, too short, all zeroes, or missing — so a bad
+# value fails at boot with a container that will not start. Running the same
+# validation locally turns that into a message on your laptop.
+
+services:
+  # ---------------------------------------------------------------------------
+  # Object store — private, disk-backed, never exposed
+  # ---------------------------------------------------------------------------
+  - type: pserv
+    name: sgw-object-store
+    runtime: image
+    plan: starter
+    image:
+      url: docker.io/minio/minio:latest
+    # `--console-address` is omitted deliberately: the console is an admin UI and
+    # this service has no ingress. Administer it through `mc` from a shell.
+    dockerCommand: minio server /data
+    disk:
+      name: sgw-objects
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: MINIO_ROOT_USER
+        sync: false
+      - key: MINIO_ROOT_PASSWORD
+        sync: false
+
+  # ---------------------------------------------------------------------------
+  # Gateway API
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: sgw-api
+    runtime: docker
+    plan: standard
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health/live
+    # Liveness, not readiness. A readiness probe fails when a dependency is
+    # down, and Render would take the instance out of rotation for something a
+    # restart cannot fix — turning a degraded gateway into an absent one.
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: APP_HOST
+        value: 0.0.0.0
+      - key: APP_PORT
+        value: 8000
+      - key: LOG_LEVEL
+        value: INFO
+
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sgw-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: sgw-keyvalue
+          property: connectionString
+
+      # Reached over Render's private network. `http` is correct here: the hop
+      # does not leave the private network, and the objects on the wire are
+      # already sealed with per-document AES-256-GCM (ADR-0020).
+      - key: OBJECT_STORE_ENDPOINT_URL
+        fromService:
+          type: pserv
+          name: sgw-object-store
+          property: hostport
+      - key: OBJECT_STORE_BUCKET
+        value: sgw-documents
+      - key: OBJECT_STORE_USE_PATH_STYLE
+        value: "true"
+      - key: OBJECT_STORE_ACCESS_KEY_ID
+        sync: false
+      - key: OBJECT_STORE_SECRET_ACCESS_KEY
+        sync: false
+
+      # Secrets. Generate with scripts/generate_deploy_secrets.py; production
+      # refuses placeholders, short values, and all-zero keys.
+      - key: API_KEY_PEPPER
+        sync: false
+      - key: AUDIT_HMAC_KEY
+        sync: false
+      - key: VAULT_ACTIVE_KEY_ID
+        value: prod1
+      - key: VAULT_KEY_PROD1
+        sync: false
+      - key: DOCUMENT_ACTIVE_KEY_ID
+        value: prod1
+      - key: DOCUMENT_KEY_PROD1
+        sync: false
+      - key: METRICS_TOKEN
+        sync: false
+
+      - key: DOCUMENTS_ENABLED
+        value: "true"
+      - key: METRICS_ENABLED
+        value: "true"
+      # Mock by default so a first deploy cannot spend money (ADR-0016). Set
+      # OPENAI_API_KEY and switch this to reach a real provider.
+      - key: DEFAULT_PROVIDER
+        value: mock
+      # Must name the workspace origin exactly. A wildcard is refused in
+      # production, which is the check catching a lazy deploy rather than an
+      # inconvenience.
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+
+  # ---------------------------------------------------------------------------
+  # Workspace (Next.js)
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: sgw-workspace
+    runtime: node
+    plan: starter
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Baked into the client bundle at build time, so it must be the API's
+      # public URL and not an internal hostname — the browser makes this call,
+      # not the server.
+      - key: NEXT_PUBLIC_GATEWAY_ORIGIN
+        sync: false
+
+  # ---------------------------------------------------------------------------
+  # Session vault (Redis / Key Value)
+  # ---------------------------------------------------------------------------
+  #
+  # VERIFY THIS BLOCK AGAINST RENDER'S CURRENT BLUEPRINT REFERENCE BEFORE
+  # DEPLOYING. Render renamed its Redis offering to "Key Value", and I am not
+  # certain whether the blueprint key is still `type: redis` or now
+  # `type: keyvalue` — the `fromService` reference above uses the same name and
+  # must match whichever it is. Everything else in this file I am confident
+  # about; this one block is a guess with a plausible shape.
+  #
+  # `ipAllowList: []` is not an oversight. Empty means *no* external addresses,
+  # so the store is reachable only from inside this blueprint. The vault holds
+  # reversible mappings to original values and is the highest-value store in the
+  # system (docs/threat-model.md); it should never be publicly addressable.
+  - type: keyvalue
+    name: sgw-keyvalue
+    plan: starter
+    ipAllowList: []
+    # Mappings carry their own TTL and are re-mintable, so eviction under
+    # pressure costs a re-tokenization rather than data loss.
+    maxmemoryPolicy: allkeys-lru
+
+databases:
+  - name: sgw-postgres
+    plan: basic-256mb
+    postgresMajorVersion: "16"

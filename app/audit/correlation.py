@@ -48,6 +48,7 @@ label derived from the same root secret."""
 PROMPT_DOMAIN: Final = b"sgw:audit:prompt:v1"
 RESPONSE_DOMAIN: Final = b"sgw:audit:response:v1"
 SESSION_DOMAIN: Final = b"sgw:audit:session:v1"
+OUTBOUND_DOMAIN: Final = b"sgw:audit:outbound:v1"
 
 MIN_KEY_BYTES: Final = 16
 _LENGTH_PREFIX_BYTES: Final = 4
@@ -112,6 +113,20 @@ class CorrelationHasher:
     def response_digest(self, *, tenant_id: UUID, text: str) -> str:
         """Digest one provider response."""
         return self._digest(RESPONSE_DOMAIN, tenant_id, (text.encode("utf-8"),))
+
+    def outbound_digest(self, *, tenant_id: UUID, payload: bytes) -> str:
+        """Digest the exact bytes handed to a provider adapter (ADR-0024).
+
+        Takes ``bytes`` rather than ``str`` deliberately. The thing being
+        attested is a serialisation, and re-encoding it here would mean the
+        digest covers this module's idea of the payload rather than the one
+        that was actually produced.
+
+        Its own domain constant, so an outbound attestation can never equal the
+        prompt digest of the same content -- the two answer different questions
+        and an operator reading the table must be able to tell them apart.
+        """
+        return self._digest(OUTBOUND_DOMAIN, tenant_id, (payload,))
 
     def session_digest(self, *, tenant_id: UUID, session_id: UUID) -> str:
         """Digest a session id for the ``session_id_hash`` column.

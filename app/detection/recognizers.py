@@ -42,6 +42,7 @@ from app.detection.entities import (
     ACCESS_TOKEN,
     ACCOUNT_NUMBER,
     API_KEY,
+    EMAIL_ADDRESS,
     HEALTH_PLAN_ID,
     MEDICAL_RECORD_NUMBER,
 )
@@ -291,12 +292,59 @@ class EnterpriseAccountNumberRecognizer(RegexRecognizer):
     )
 
 
+class InternalEmailRecognizer(RegexRecognizer):
+    """Email addresses whose TLD is not on the Public Suffix List.
+
+    Presidio's own ``EmailRecognizer`` validates every match with
+    ``tldextract``, which resolves against the Public Suffix List. A private or
+    reserved TLD is absent from that list, so the match is *discarded* -- and
+    the address reaches the provider in clear text. Verified against the
+    running stack: ``@example.com`` scores 1.0, while ``@acme.internal``,
+    ``@acme.lan``, ``@acme.corp``, and the RFC 2606 reserved names
+    (``.test``, ``.example``, ``.invalid``, ``.localhost``) produce no
+    detection at all.
+
+    ``.internal`` is the case that matters. ICANN reserved it in 2024 as *the*
+    recommended TLD for private networks, so an enterprise running this gateway
+    on its own infrastructure is exactly the deployment whose internal mail
+    addresses this recognizer catches.
+
+    This pattern deliberately does not consult a TLD list of its own. A list is
+    what failed here: any allowlist is a set of TLDs someone remembered, and a
+    privacy control that fails open on the ones they did not is the wrong shape.
+    Matching on structure instead means a new or private TLD is covered the day
+    it appears.
+
+    Scored just below Presidio's 1.0 so that on a public address both
+    recognizers fire and deterministic overlap resolution keeps Presidio's
+    result; on a private address this is the only detection there is. The score
+    still clears the default ``EMAIL_ADDRESS`` threshold on its own.
+    """
+
+    ENTITY: ClassVar[str] = EMAIL_ADDRESS
+    CONTEXT: ClassVar[tuple[str, ...]] = ("email", "e-mail", "mail", "contact", "address")
+    PATTERNS: ClassVar[tuple[CompiledPattern, ...]] = (
+        CompiledPattern(
+            "email any tld",
+            # Local part per RFC 5322's practical subset, then a dotted domain.
+            # The TLD is required to be alphabetic and at least two characters
+            # so this does not fire on version strings or file names.
+            re.compile(
+                r"\b[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+"
+                r"[A-Za-z]{2,}\b"
+            ),
+            0.9,
+        ),
+    )
+
+
 CUSTOM_RECOGNIZER_TYPES: tuple[type[RegexRecognizer], ...] = (
     ApiKeyRecognizer,
     BearerTokenRecognizer,
     MedicalRecordNumberRecognizer,
     HealthPlanIdRecognizer,
     EnterpriseAccountNumberRecognizer,
+    InternalEmailRecognizer,
 )
 
 

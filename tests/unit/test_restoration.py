@@ -25,7 +25,13 @@ from app.domain.errors import (
     VaultEncryptionError,
     VaultUnavailableError,
 )
-from app.domain.models import PrivacySummary, ProviderResponse, ProviderUsage, UnknownTokenAction
+from app.domain.models import (
+    PrivacySummary,
+    ProviderResponse,
+    ProviderUsage,
+    UnknownTokenAction,
+    VaultWriteRequest,
+)
 from app.restoration import DEFAULT_MAX_OUTPUT_CHARS, OutputPipeline, RestoredOutput
 from app.restoration.protocols import PolicyLike, VaultLike
 from app.tokenization.grammar import format_redaction, format_token, parse_token
@@ -103,14 +109,19 @@ async def mint(
     session_id: UUID = SESSION,
 ) -> str:
     """Store one mapping and return its token."""
-    return await vault.get_or_create(
+    tokens = await vault.get_or_create_many(
         tenant_id=tenant_id,
         session_id=session_id,
-        entity_type=entity_type,
-        normalized_hmac=f"hmac::{entity_type}::{value}",
-        original_value=value,
+        entries=(
+            VaultWriteRequest(
+                entity_type=entity_type,
+                normalized_hmac=f"hmac::{entity_type}::{value}",
+                original_value=value,
+            ),
+        ),
         ttl_seconds=TTL,
     )
+    return tokens[0]
 
 
 async def run(

@@ -80,11 +80,129 @@ class Settings(BaseSettings):
 
     openai_api_key: SecretStr | None = None
 
+    document_active_key_id: str = "local1"
+    document_keys: dict[str, SecretStr] = Field(default_factory=dict)
+    """Document key ring, populated from ``DOCUMENT_KEY_<KEY_ID>`` variables.
+
+    Separate from the vault ring on purpose. The two protect data with different
+    lifetimes -- session mappings expire in minutes to hours, stored documents
+    persist -- so they rotate on different schedules, and a compromise of one
+    ring should not be a compromise of the other.
+    """
+
+    # -- Object storage (ADR-0020, ADR-0027) ------------------------------
+    documents_enabled: bool = True
+    """Whether the document routes are mounted and object storage is opened.
+
+    A deployment that does not accept uploads turns this off rather than
+    configuring a bucket it will never use -- and production then stops
+    demanding document keys it has no documents to protect.
+    """
+
+    object_store_endpoint_url: str | None = None
+    """MinIO or another S3-compatible endpoint. ``None`` means real AWS S3."""
+
+    object_store_region: str = "us-east-1"
+    object_store_bucket: str = "sgw-documents"
+    object_store_access_key_id: SecretStr | None = None
+    object_store_secret_access_key: SecretStr | None = None
+
+    object_store_use_path_style: bool = True
+    """MinIO addresses buckets by path; AWS S3 prefers virtual-host style."""
+
+    object_store_connect_timeout_seconds: float = Field(default=5.0, gt=0)
+    object_store_read_timeout_seconds: float = Field(default=30.0, gt=0)
+
     # -- Limits -----------------------------------------------------------
     default_session_ttl_seconds: int = Field(default=1800, ge=60, le=86_400)
     max_request_bytes: int = Field(default=262_144, ge=1_024)
     max_message_chars: int = Field(default=32_768, ge=1)
     max_entities_per_request: int = Field(default=500, ge=1, le=10_000)
+
+    max_document_bytes: int = Field(default=26_214_400, ge=1_024, le=1_073_741_824)
+    """25 MiB. The JSON limit above stays small; only the upload route gets this."""
+
+    document_chunk_bytes: int = Field(default=5_242_880, ge=5_242_880, le=67_108_864)
+    """Plaintext bytes sealed per chunk, and the multipart part size.
+
+    Floored at S3's 5 MiB minimum part size: every part except the last must
+    reach it, so a smaller value would make multipart uploads fail on the
+    second part rather than on a boundary anyone would notice in testing.
+    """
+
+    # -- Document extraction and segmentation (ADR-0028, ADR-0029, ADR-0030) --
+    extraction_max_workers: int = Field(default=2, ge=1, le=32)
+    """Documents extracted at once. Each gets its own process.
+
+    Bounded because unbounded extraction is a denial-of-service vector: a
+    handful of large uploads would start a process each and starve the request
+    path. Two is deliberately conservative -- parsing is CPU-bound, so this
+    should track available cores rather than expected traffic.
+    """
+
+    extraction_timeout_seconds: float = Field(default=30.0, gt=0, le=600.0)
+    """Wall-clock budget for one extraction, after which the worker is killed.
+
+    A real deadline rather than a hope: the worker runs in its own process, so
+    the timeout ends it instead of merely abandoning it.
+    """
+
+    max_extracted_characters: int = Field(default=4_000_000, ge=1_024, le=100_000_000)
+    """Ceiling on extracted text. Roughly 1,500 pages of dense prose.
+
+    Enforced inside the worker while accumulating, so a file that expands
+    without bound is stopped part-way rather than after it has already been
+    allocated.
+    """
+
+    segment_max_characters: int = Field(default=12_000, ge=64, le=1_000_000)
+    """Largest segment handed to the detector.
+
+    Inside every current model's context window, and short enough that
+    detection accuracy does not degrade with length.
+    """
+
+    segment_overlap_characters: int = Field(default=256, ge=0, le=100_000)
+    """How much of the previous segment each segment repeats.
+
+    This is a **privacy** control, not a tuning knob. An entity shorter than the
+    overlap is guaranteed to appear whole in at least one segment; anything
+    longer can be split across a boundary and seen only in fragments, which no
+    recognizer matches. Lowering it trades detection coverage for throughput.
+    """
+
+    # -- Detection over documents (ADR-0002, ADR-0014, ADR-0031) ----------
+    document_detection_concurrency: int = Field(default=4, ge=1, le=64)
+    """Segments detected at once, across every document in flight.
+
+    Presidio analysis is CPU-bound and runs on a worker thread per call, so an
+    unbounded fan-out over a long document asks for a thread per segment and
+    starves the request path rather than finishing sooner. The bound is shared
+    by the whole process, not applied per document.
+    """
+
+    max_document_entities: int = Field(default=10_000, ge=1, le=100_000)
+    """Ceiling on labeled spans in one document.
+
+    Deliberately not ``max_entities_per_request``: 500 is generous for a prompt
+    and refuses an ordinary clinical document. This bound exists to stop one
+    upload from becoming an unbounded batch of vault writes in the phase that
+    protects it. The default matches ``MAX_POLICY_ENTITY_BUDGET``, the most a
+    policy document is permitted to ask for.
+    """
+
+    @model_validator(mode="after")
+    def _segments_must_be_able_to_advance(self) -> Self:
+        """An overlap at or above the segment size makes segmentation stall.
+
+        Caught here rather than at the first upload, because the failure would
+        otherwise be a hang in a request rather than a refusal at startup.
+        """
+        if self.segment_overlap_characters >= self.segment_max_characters:
+            raise ValueError(
+                "SEGMENT_OVERLAP_CHARACTERS must be smaller than SEGMENT_MAX_CHARACTERS"
+            )
+        return self
 
     # -- Provider ---------------------------------------------------------
     default_provider: str = "mock"
@@ -105,6 +223,24 @@ class Settings(BaseSettings):
 
     audit_fail_closed: bool = True
     """When true, an audit write failure fails the request."""
+
+    # -- Observability ----------------------------------------------------
+    metrics_enabled: bool = True
+    """Whether ``GET /metrics`` is mounted at all.
+
+    A deployment that scrapes through a sidecar, or that has decided the
+    endpoint is not worth the surface area, turns it off here rather than
+    relying on the route being unreachable by accident.
+    """
+
+    metrics_token: SecretStr | None = None
+    """Bearer credential a scraper must present to read ``/metrics``.
+
+    Deliberately *not* an API key from the database: metrics are most valuable
+    when PostgreSQL is the thing that is broken, so the check guarding them must
+    not depend on it. Unset leaves the endpoint open, which production refuses
+    to start with.
+    """
 
     otel_exporter_otlp_endpoint: str | None = None
 
@@ -142,6 +278,20 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _load_document_key_ring(self) -> Self:
+        """Read ``DOCUMENT_KEY_<ID>`` variables into the document key ring."""
+        import os
+
+        if not self.document_keys:
+            discovered = {
+                name.removeprefix("DOCUMENT_KEY_").lower(): SecretStr(raw)
+                for name, raw in os.environ.items()
+                if name.startswith("DOCUMENT_KEY_") and raw
+            }
+            object.__setattr__(self, "document_keys", discovered)
+        return self
+
+    @model_validator(mode="after")
     def _enforce_production_hardening(self) -> Self:
         if self.app_env is not AppEnv.PRODUCTION:
             return self
@@ -170,11 +320,66 @@ class Settings(BaseSettings):
         if "*" in self.cors_allowed_origins:
             problems.append("CORS_ALLOWED_ORIGINS must not be a wildcard in production")
 
+        if self.metrics_enabled and self.metrics_token is None:
+            # /metrics publishes request rates, error rates, and dependency
+            # health. That is a reconnaissance surface, and an unauthenticated
+            # one is not something a deployment should be able to ship by
+            # forgetting a variable.
+            problems.append("METRICS_TOKEN must be set when METRICS_ENABLED is true in production")
+
+        if self.metrics_token is not None:
+            problems.extend(self._metrics_token_problems(self.metrics_token))
+
+        if self.documents_enabled:
+            problems.extend(self._document_storage_problems())
+
         if problems:
             # Names of misconfigured variables only. No values.
             raise ValueError("invalid production configuration: " + "; ".join(problems))
 
         return self
+
+    @staticmethod
+    def _metrics_token_problems(token: SecretStr) -> list[str]:
+        raw = token.get_secret_value()
+        if raw in DEVELOPMENT_PLACEHOLDERS:
+            return ["METRICS_TOKEN is still a development placeholder"]
+        if len(raw) < MIN_SECRET_CHARS:
+            return [f"METRICS_TOKEN must be at least {MIN_SECRET_CHARS} characters"]
+        return []
+
+    def _document_storage_problems(self) -> list[str]:
+        """Production refuses to accept uploads it cannot protect or store."""
+        problems: list[str] = []
+
+        active = self.document_keys.get(self.document_active_key_id.lower())
+        if active is None:
+            problems.append(
+                "no DOCUMENT_KEY_ entry matches "
+                f"DOCUMENT_ACTIVE_KEY_ID={self.document_active_key_id!r}"
+            )
+        else:
+            problems.extend(
+                problem.replace("vault key", "document key")
+                for problem in self._vault_key_problems(active)
+            )
+
+        if not self.object_store_bucket:
+            problems.append("OBJECT_STORE_BUCKET must be set when DOCUMENTS_ENABLED is true")
+        if self.object_store_access_key_id is None:
+            problems.append("OBJECT_STORE_ACCESS_KEY_ID must be set when DOCUMENTS_ENABLED is true")
+        if self.object_store_secret_access_key is None:
+            problems.append(
+                "OBJECT_STORE_SECRET_ACCESS_KEY must be set when DOCUMENTS_ENABLED is true"
+            )
+        for name, secret in (
+            ("OBJECT_STORE_ACCESS_KEY_ID", self.object_store_access_key_id),
+            ("OBJECT_STORE_SECRET_ACCESS_KEY", self.object_store_secret_access_key),
+        ):
+            if secret is not None and secret.get_secret_value() in DEVELOPMENT_PLACEHOLDERS:
+                problems.append(f"{name} is still a development placeholder")
+
+        return problems
 
     @staticmethod
     def _vault_key_problems(key: SecretStr) -> list[str]:
@@ -217,6 +422,13 @@ class Settings(BaseSettings):
         secret = self.vault_keys.get(key_id.lower())
         if secret is None:
             raise ValueError("the requested vault key id is not present in the key ring")
+        return base64.b64decode(secret.get_secret_value(), validate=True)
+
+    def document_key(self, key_id: str) -> bytes:
+        """Return a specific document key so documents sealed earlier still open."""
+        secret = self.document_keys.get(key_id.lower())
+        if secret is None:
+            raise ValueError("the requested document key id is not present in the key ring")
         return base64.b64decode(secret.get_secret_value(), validate=True)
 
 

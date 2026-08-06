@@ -706,7 +706,7 @@ async def invoke(raw_request: ChatRequest, principal: Principal) -> ChatResponse
 - [x] `DELETE /v1/sessions/{session_id}`
 - [x] `GET /health/live`
 - [x] `GET /health/ready`
-- [ ] `GET /metrics`
+- [x] `GET /metrics`
 
 ### `POST /v1/chat`
 
@@ -795,13 +795,18 @@ Create a test that:
 
 ### Tasks
 
-- [ ] Add Prometheus metrics from architecture specification.
-- [ ] Add safe structured logs.
-- [ ] Add optional OpenTelemetry tracing.
-- [ ] Add readiness checks.
-- [ ] Add dependency status without exposing credentials or hosts.
+- [x] Add Prometheus metrics from architecture specification. (Two documented
+      deviations: `model` is not a provider label and `entity_type` is not a
+      vault label, both because those strings are caller-supplied at the point
+      of recording. See `docs/observability.md` §1.)
+- [x] Add safe structured logs.
+- [ ] Add optional OpenTelemetry tracing. (`OTEL_EXPORTER_OTLP_ENDPOINT` exists
+      in `Settings`; nothing reads it. No dependency, no instrumentation.)
+- [x] Add readiness checks.
+- [x] Add dependency status without exposing credentials or hosts.
 - [ ] Add sample Grafana dashboard JSON only if time permits.
-- [ ] Add alert recommendations to README.
+- [x] Add alert recommendations to README. (In `docs/observability.md` §4,
+      linked from the README index rather than inlined into it.)
 
 ### Suggested alerts
 
@@ -859,15 +864,245 @@ Grafana is optional for version 1.
 - Container runs as non-root.
 - Image does not include `.env`, tests containing secrets, or build caches.
 
+**Verified 2026-08-04, all five.** Cold start from an empty volume;
+`/health/ready` returns `{"redis":"up","database":"up"}`; a `POST /v1/chat`
+against the mock provider tokenized and restored two entities; the process runs
+as `uid=10001(gateway)`; `/app` contains only `alembic.ini`, `app`,
+`migrations`, and `scripts`. Getting there took four fixes — see PROGRESS.md
+§3, defects 8–11. The migration step is `make compose-migrate`, which runs
+inside the stack: the compose database publishes no host port, so the host-run
+`make migrate` cannot reach it.
+
+---
+
+## 20. Phase 15 — Secure Document Storage
+
+Storage only. Extraction, segmentation, detection, tokenization, and restoration
+for documents are **not** in this phase, and the code contains no partial
+version of them — no unused status member, no dead column, no stub that returns
+`NotImplemented`. See ADR-0020, ADR-0021, ADR-0027, and
+`docs/document-processing.md`.
+
+### Tasks
+
+- [x] Add `app/documents/` with a `DocumentStore` Protocol, an aioboto3
+      S3-compatible adapter, and an in-memory fake.
+- [x] Chunked AES-256-GCM with per-document HKDF-SHA256 data keys.
+- [x] Boundary validation: filename, type (extension + MIME + magic bytes),
+      and length (declared and streamed).
+- [x] Streaming upload and download, with S3 multipart past the part threshold
+      and explicit abort on failure or cancellation.
+- [x] Opaque storage keys; the object store is never told the real content type.
+- [x] Encrypted filename column; tenant- and user-scoped repository.
+- [x] Four routes under `/v1/documents`, with their own scopes.
+- [x] Alembic migration `0002_documents`, verified in both directions.
+- [x] MinIO and a bucket-initialization service in Docker Compose (ADR-0027).
+- [x] Settings, production hardening checks, and `.env.example` entries.
+- [x] Unit, security, privacy, and MinIO integration suites.
+- [x] CI runs the MinIO suite and fails if it would skip.
+- [ ] Retention enforcement. Documents persist until deleted.
+- [ ] Key rotation tooling. The format supports it; nothing drives it.
+
+### Deviations worth knowing
+
+- **Routes are `/v1/documents`, not `/documents`.** Every other route in the
+  gateway is versioned, and an unversioned sibling to `/v1/chat` reads as a bug.
+- **`user_id` is the API key id.** The gateway authenticates keys, not people.
+  Two keys in one tenant are two principals and cannot read each other's
+  documents. `app/api/v1/documents.py::_user_id` is the single place that
+  changes when a user model arrives.
+- **`DOCUMENTS_ENABLED` gates both the routes and the configuration
+  requirement**, so a deployment that does not accept uploads is not forced to
+  configure a bucket.
+
+### Acceptance criteria
+
+- A document round-trips through real MinIO, sealed, via multipart.
+- The stored object contains no plaintext, and the object key names nothing.
+- Another tenant, another user, and an unknown id all get the same answer.
+- A copy of one principal's object under another's key fails to authenticate.
+- No failure leaves a row claiming `stored` without an object.
+- An interrupted or cancelled multipart upload leaves no open upload behind.
+- No canary value reaches a log line, a SQL statement, a metric, a response, or
+  an object key.
+
+**Verified 2026-08-05.** All seven, against a live MinIO rather than the fake.
+Getting there found three more defects — an integration fixture that had never
+executed because it patched a `__slots__` class, filename validation that
+accepted bidirectional override characters, and a canary sweep that was reading
+an empty log because application startup removes pytest's capture handler. See
+PROGRESS.md.
+
+---
+
+## 20a. Phase 15b — Document Extraction and Segmentation
+
+Turns a stored document into detector-ready segments and stops there. See
+ADR-0028, ADR-0029, ADR-0030, and `docs/document-processing.md`.
+
+### Tasks
+
+- [x] TXT, PDF, and DOCX extraction as pure, picklable functions with their own
+      guards: strict UTF-8, encrypted PDFs refused, ZIP expansion and entry
+      limits read from the central directory before anything is decompressed.
+- [x] One **spawned** subprocess per document, bounded by a semaphore, with a
+      wall-clock deadline that terminates the worker rather than abandoning it,
+      and reaping on every exit path.
+- [x] One canonical text buffer; pages and segments are ranges into it with
+      global offsets, derived by slicing and never copied.
+- [x] Whitespace-aware segment boundaries plus overlap, property-tested.
+- [x] `DocumentProcessor` — open, decrypt, extract, segment. Nothing persisted:
+      no table, no object, no temporary file.
+- [x] Logger floors raised for `pypdf`, `docx`, and `lxml`, applied inside the
+      child as well as the parent.
+
+**No routes, no migration, and no new `DocumentStatus` member.**
+
+**Verified 2026-08-05.** Hypothesis found one defect during the checkpoint — a
+segment that could be wholly contained in its predecessor, which is correct-but
+-quietly-much-worse rather than wrong. See PROGRESS.md defect 19.
+
+---
+
+## 20b. Phase 15c — Document Detection and Labeled Spans
+
+Locates every sensitive value in a stored document and attaches the policy's
+decision. Tokenization, vault interaction, provider calls, and restoration are
+**not** in this phase, and the code contains no partial version of them. See
+ADR-0031, ADR-0032, ADR-0002, ADR-0014, and `docs/document-processing.md`.
+
+### Tasks
+
+- [x] Run the detector over every segment, bounded by
+      `DOCUMENT_DETECTION_CONCURRENCY` shared across documents.
+- [x] Promote segment-local offsets to document-global ones through
+      `Segment.to_global`, the single place that arithmetic is written.
+- [x] Coalesce detections sharing a span identity, keeping the highest score and
+      the union of the segments they came from.
+- [x] Apply the policy's `min_score` **before** resolving overlaps, then resolve
+      with the severity-first rule the prompt path uses.
+- [x] Label each survivor with the policy's action and the pages it touches.
+- [x] Refuse the document on a blocked entity type, naming the type and never
+      the value; bound labeled spans with `MAX_DOCUMENT_ENTITIES`.
+- [x] `AnalyzedDocument` as the checkpoint: it cannot hold overlapping,
+      backwards, out-of-range, or blocked spans.
+- [x] Wire `DocumentAnalyzer` in the composition root, sharing the one warmed
+      detector with the chat pipeline.
+- [x] Canary sweep over logs, `repr`, and errors, including the assertion that
+      no offset and no per-type breakdown reaches a log line.
+
+**No routes, no migration, and still no new `DocumentStatus` member** — ADR-0032
+records why readiness is a type rather than a status.
+
+**Verified 2026-08-05.** The checkpoint found one defect that predates this
+phase: every document log line was silently losing its fields to the logging
+allowlist. See PROGRESS.md defect 20.
+
+---
+
+## 20c. Phase 15d — Document Protection
+
+Applies the labeled spans and persists the mappings they need. The outbound
+scan, the provider call, restoration, and audit for documents are **not** in
+this phase. See ADR-0033, ADR-0022, and `docs/document-processing.md`.
+
+### Tasks
+
+- [x] `DocumentProtector` calling the **prompt tokenizer**, not a second
+      implementation of the right-to-left splice or the batched mint.
+- [x] `AnalyzedDocument` carries its `PolicySnapshot`, so protection applies the
+      rules detection decided under rather than re-resolving them.
+- [x] `_DocumentEntityBudget` — the snapshot with `MAX_DOCUMENT_ENTITIES`
+      substituted, because the tokenizer's ceiling is the per-request one.
+- [x] `session_id` as a parameter: a token resolves only in the session it was
+      minted in, so it must be the session that will quote it.
+- [x] Verify the tokenizer's re-derivation reproduced the labels, and refuse a
+      result that acted on a different number of spans.
+- [x] `ProtectedDocument` as the provider checkpoint, carrying no mappings.
+- [x] Wire `DocumentProtector` in the composition root, sharing the pipeline's
+      tokenizer and therefore its vault, pepper, and token grammar.
+
+**No routes, no migration, and no new `DocumentStatus` member.**
+
+**Verified 2026-08-05.** Against the real tokenizer and a vault that mints real
+tokens under the real grammar; the vault seam is asserted behaviourally, by
+resolving a document's token through the chat path's vault.
+
+---
+
+## 20d. Phase 15e — Outbound Attestation and the Document Route
+
+The document journey end to end, and the first implementation of ADR-0024. See
+also ADR-0013, ADR-0015, and `docs/document-processing.md`.
+
+### Tasks
+
+- [x] Canonical outbound serialization: framing version, aliases, policy
+      version, and each message length-prefixed. Not the provider's wire format.
+- [x] Runtime privacy scan over the exact payload, discarding detections inside
+      a token or a redaction, refusing on anything the policy would act on.
+- [x] `DocumentPipeline` — protect, serialize, scan, transmit, restore, attest —
+      with one byte string used for the scan, the transmission, and the digest.
+- [x] `CorrelationHasher.outbound_digest` under its own domain constant.
+- [x] `audit_events.outbound_hmac` and `outbound_scan`, written on the success
+      **and** the blocked path, with migration `0003` both directions.
+- [x] `POST /v1/documents/{id}/process`, requiring `documents:read` *and*
+      `chat:invoke`.
+- [x] End-to-end fixture workflow: upload a canary document, process it against
+      a provider that records what it received, and assert the provider saw no
+      original while the caller got them back.
+
+**One route and one migration.** Still no new `DocumentStatus` member: nothing
+about a request outlives it.
+
+**Verified 2026-08-06.** The migration runs both directions against PostgreSQL.
+The central assertion is `test_the_provider_never_sees_an_original`, which is
+only possible because the mock adapter is wrapped in something that remembers
+its input.
+
+---
+
+## 20e. Phase 15f — Shared Outbound Boundary and Instruction Protection
+
+Security hardening only. No new routes and no schema change. See ADR-0024,
+which this phase completes.
+
+### Tasks
+
+- [x] Extract serialization, the scan, the digests, the provider invocation, and
+      the attestation into `app/outbound/` as one shared component.
+- [x] Route **both** `/v1/chat` and `POST /v1/documents/{id}/process` through the
+      same `OutboundGateway` instance, asserted on object identity.
+- [x] Keep the chat pipeline's deadline and concurrency bound by injecting *how*
+      the adapter is awaited, never *whether*.
+- [x] Detect and protect the caller's document instruction under the same
+      tenant, session, policy snapshot, tokenizer, and vault as the document, so
+      a shared value collapses onto one token.
+- [x] Refuse a blocked instruction entity **before** the document's vault write.
+- [x] Populate `prompt_hmac`, `response_hmac`, `outbound_hmac`, and
+      `outbound_scan` on both routes, preserving nullable semantics for requests
+      refused before serialization.
+
+**Verified 2026-08-06.** The scan was changed to run message by message during
+this phase, because the concatenation produced context-sensitive findings that
+refused ordinary traffic — recorded in ADR-0024's As Built section and in
+PROGRESS.md §4.
+
 ---
 
 
 ## 17. Phase 16 — Frontend Bootstrap
 
+**Partially done.** `frontend/` exists as a Next.js App Router application with
+Tailwind, strict TypeScript, ESLint, and browser security headers, and it serves
+the secure chat workspace. Vitest, React Testing Library, and Playwright are
+installed or planned but no component or E2E test is written yet, so the UI has
+**no automated coverage** -- verified by hand only.
+
 ### Tasks
 
-- [ ] Create `frontend/` as a Next.js TypeScript application using the App Router.
-- [ ] Configure Tailwind CSS and accessible UI primitives.
+- [x] Create `frontend/` as a Next.js TypeScript application using the App Router.
+- [x] Configure Tailwind CSS and accessible UI primitives.
 - [ ] Configure ESLint, formatting, TypeScript strict mode, Vitest, React Testing Library, and Playwright.
 - [ ] Add application shell, sidebar, header, loading states, empty states, and error boundary.
 - [ ] Implement one typed gateway API client.

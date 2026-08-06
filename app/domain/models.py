@@ -151,6 +151,27 @@ class EntityMapping:
         return f"EntityMapping(entity_type={self.entity_type!r}, token_id={self.token_id!r})"
 
 
+@dataclass(frozen=True, slots=True)
+class VaultWriteRequest:
+    """One mapping to mint or reuse, as handed to the vault in a batch.
+
+    This type lives in the domain layer rather than in ``app.vault`` because it
+    is the contract *between* the tokenizer and the vault, and the tokenizer
+    must not import the vault package -- see ``app.tokenization.protocols``.
+
+    Like ``EntityMapping``, an instance carries an original value and must never
+    be logged or serialized.
+    """
+
+    entity_type: str
+    normalized_hmac: str
+    original_value: str
+
+    def __repr__(self) -> str:
+        # Defensive: a stray repr() in a traceback must not leak the original.
+        return f"VaultWriteRequest(entity_type={self.entity_type!r})"
+
+
 class PrivacySummary(BaseModel):
     """Counts only. This is the sole privacy detail that leaves the gateway."""
 
@@ -254,6 +275,9 @@ class Scope(StrEnum):
     CHAT_INVOKE = "chat:invoke"
     DETECT_INVOKE = "detect:invoke"
     SESSIONS_DELETE = "sessions:delete"
+    DOCUMENTS_WRITE = "documents:write"
+    DOCUMENTS_READ = "documents:read"
+    DOCUMENTS_DELETE = "documents:delete"
 
 
 @dataclass(frozen=True, slots=True)

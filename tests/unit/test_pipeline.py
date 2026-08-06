@@ -15,6 +15,7 @@ from inside the provider call, that the mappings are already there.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 from uuid import UUID
@@ -22,6 +23,7 @@ from uuid import UUID
 import pytest
 from pydantic import SecretStr
 
+from app.audit.correlation import CorrelationHasher
 from app.config.settings import AppEnv, Settings
 from app.detection import Detector, FakeDetector
 from app.domain.errors import (
@@ -52,8 +54,10 @@ from app.domain.models import (
     ProviderResponse,
     ProviderUsage,
     Scope,
+    VaultWriteRequest,
 )
 from app.llm import ProviderRegistry
+from app.outbound.gateway import OutboundGateway
 from app.pipeline import (
     DetectorLike,
     OutputPipelineLike,
@@ -96,7 +100,7 @@ EMAIL: Final = "jordan.rivera@example.com"
 OTHER_EMAIL: Final = "dana.whitfield@example.org"
 SSN: Final = "123-45-6789"
 
-VAULT_WRITE: Final = "vault.get_or_create"
+VAULT_WRITE: Final = "vault.get_or_create_many"
 VAULT_READ: Final = "vault.resolve_many"
 PROVIDER_CALL: Final = "provider.complete"
 RESTORE_CALL: Final = "output.restore"
@@ -200,28 +204,25 @@ class RecordingVault:
     def stored_original_values(self) -> list[str]:
         return self._inner.stored_original_values()
 
-    async def get_or_create(
+    async def get_or_create_many(
         self,
         *,
         tenant_id: UUID,
         session_id: UUID,
-        entity_type: str,
-        normalized_hmac: str,
-        original_value: str,
+        entries: Sequence[VaultWriteRequest],
         ttl_seconds: int,
-    ) -> str:
-        token = await self._inner.get_or_create(
+    ) -> tuple[str, ...]:
+        tokens = await self._inner.get_or_create_many(
             tenant_id=tenant_id,
             session_id=session_id,
-            entity_type=entity_type,
-            normalized_hmac=normalized_hmac,
-            original_value=original_value,
+            entries=entries,
             ttl_seconds=ttl_seconds,
         )
         # Appended *after* the write returns, so the log records durability,
-        # not intent.
+        # not intent. One entry per batch, whatever the entity count -- which
+        # is what makes the ordering assertions also assert ADR-0022.
         self._log.append(VAULT_WRITE)
-        return token
+        return tokens
 
     async def resolve_many(
         self, *, tenant_id: UUID, session_id: UUID, tokens: set[str]
@@ -420,12 +421,21 @@ def build_harness(
     resolved_settings = settings if settings is not None else build_settings()
     resolved_detector = detector if detector is not None else FakeDetector()
 
+    resolved_registry = (
+        registry if registry is not None else ProviderRegistry.from_providers(provider)
+    )
     pipeline = SecurePipeline(
         policy_service=policy,
         detector=resolved_detector,
         tokenizer=Tokenizer(vault=vault, fingerprinter=Fingerprinter(FINGERPRINT_KEY)),
-        provider_registry=(
-            registry if registry is not None else ProviderRegistry.from_providers(provider)
+        provider_registry=resolved_registry,
+        # The real shared boundary, not a stub. The outbound scan is a control
+        # on this path now, and a harness that stubbed it out would let every
+        # test below pass against a pipeline that never checked anything.
+        outbound=OutboundGateway(
+            detector=resolved_detector,
+            providers=resolved_registry,
+            hasher=CorrelationHasher(key=bytes(range(32))),
         ),
         output_pipeline=output,
         audit_service=audit,

@@ -88,10 +88,17 @@
 ```text
 PERSON          TOKENIZE   0.75
 EMAIL_ADDRESS   TOKENIZE   0.70
-PHONE_NUMBER    TOKENIZE   0.65
+PHONE_NUMBER    TOKENIZE   0.40
 US_SSN          BLOCK      0.50
 CREDIT_CARD     BLOCK      0.50
 ```
+
+These match the shipped defaults in `app/policy/defaults.py`. `PHONE_NUMBER` is
+deliberately 0.40, not the 0.65 an earlier draft of this wireframe showed:
+Presidio scores US phone numbers at 0.40 unless the literal word "phone" appears
+nearby, so a higher threshold discarded ordinary phrasings like
+`Call 415-555-0142` and sent them to the provider in the clear. Raising it again
+reopens that leak.
 
 ## Architecture Page
 

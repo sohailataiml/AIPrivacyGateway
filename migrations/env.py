@@ -32,7 +32,17 @@ from app.db.models import (  # noqa: F401  -- imported so Base.metadata is popul
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers` defaults to True, which would set
+    # `disabled = True` on every logger not named in alembic.ini -- that is,
+    # every `app.*` logger in the process. Alembic's generated template ships
+    # the default, and it is wrong for any process that runs a migration
+    # alongside application code: the app keeps running and silently stops
+    # logging, permanently, with nothing to indicate why.
+    #
+    # It first showed up in the test suite, where the migration suite left every
+    # later "no sensitive value in the logs" assertion reading an empty list --
+    # passing for the wrong reason.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

@@ -47,6 +47,8 @@ _PASSTHROUGH_FIELDS: tuple[str, ...] = (
     "error_code",
     "prompt_hmac",
     "response_hmac",
+    "outbound_hmac",
+    "outbound_scan",
 )
 
 DEFAULT_STATUS_CODE = 500
