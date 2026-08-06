@@ -42,6 +42,8 @@ A requirement with no status label is a requirement nobody has checked.
 | S-14 | Third-party libraries that touch content have their log floor raised | **Enforced** | Presidio, the OpenAI SDK, and now pypdf/docx/lxml |
 | S-15 | Detection over a document reads through the same tenant- and user-scoped path as retrieval | **Enforced** | `tests/security/test_document_analysis_isolation.py` |
 | S-16 | Documents and prompts are analyzed by one configured detector, so a value protected in one is protected in the other | **Enforced** | asserted on identity through `build_services` |
+| S-17 | A token minted for a document resolves through the same vault the chat path reads | **Enforced** | asserted behaviourally, not by object identity |
+| S-18 | A document the policy blocks reaches no vault call | **Enforced** | the block is raised by detection, before protection begins |
 
 ### Cryptographic requirements
 
@@ -75,6 +77,9 @@ A requirement with no status label is a requirement nobody has checked.
 | P-9 | A value straddling a boundary yields exactly one span, covering it whole | **Enforced** | ADR-0031, `TestBoundaries` against the real segmenter |
 | P-10 | Span offsets and per-type counts never reach a log line | **Enforced** | `tests/privacy/test_document_analysis_canaries.py` |
 | P-11 | Detection is never narrowed to the policy's configured entity types | **Enforced** | defect 7's regression, now asserted for documents too |
+| P-12 | No detected original survives into a protected document | **Enforced** | ADR-0033, `tests/unit/test_document_protection.py` |
+| P-13 | A span the policy decided on is never silently dropped before the splice | **Enforced** | the protector refuses a result that acted on a different count |
+| P-14 | A protected document carries no mappings; the originals are in the vault only | **Enforced** | `TestNothingLeaks` |
 
 ---
 
@@ -95,7 +100,8 @@ Document-storage requirements that are structural rather than numeric:
 | PF-5 | Extraction concurrency is bounded, so a burst cannot start a process per request | **Enforced** — `EXTRACTION_MAX_WORKERS`, sampled during a parallel run |
 | PF-6 | Extraction has a wall-clock deadline that actually ends the work | **Enforced** — the worker is terminated, not abandoned |
 | PF-7 | Detection concurrency is bounded across documents, not per document | **Enforced** — `DOCUMENT_DETECTION_CONCURRENCY`, sampled during a parallel run |
-| PF-8 | Labeled spans per document are bounded, so one upload cannot become an unbounded vault batch | **Enforced** — `MAX_DOCUMENT_ENTITIES` |
+| PF-8 | Labeled spans per document are bounded, so one upload cannot become an unbounded vault batch | **Enforced** — `MAX_DOCUMENT_ENTITIES`, at analysis and again at protection |
+| PF-10 | Protecting a document costs one vault round trip, whatever its entity count | **Enforced** — ADR-0022, asserted as a call count |
 | PF-9 | Upload throughput, extraction time, detection time, and document latency are measured | **Specified** — not measured |
 
 **Extraction does not stream, and that is deliberate.** A PDF cross-reference
@@ -193,10 +199,10 @@ requirements is marketing.
 5. **`user` means "API key id".** There is no user model, so per-user scoping is
    per-credential scoping. It is a real boundary, but not the one the word
    implies.
-6. **Document processing stops at detection.** No tokenization, vault
-   interaction, provider call, or restoration for documents. Nothing calls
-   `DocumentAnalyzer`: it is composed by the composition root and invoked by
-   nothing until the phase that protects a document.
+6. **Document processing stops at protection.** No outbound scan, provider
+   call, restoration, or audit for documents. Nothing calls
+   `DocumentProtector`: it is composed by the composition root and invoked by
+   nothing until the phase that sends a document to a provider.
 7. **Extraction is header-and-structure deep, not semantic.** A PDF with a
    well-formed object graph and meaningless content extracts successfully.
    Deciding whether a document *means* anything is not extraction's job.
@@ -209,12 +215,18 @@ requirements is marketing.
     than `SEGMENT_OVERLAP_CHARACTERS` can still be split across a boundary and
     seen only as fragments. The default is sized against the longest value a
     recognizer needs whole, which is a judgement, not a measurement.
-11. **Detection quality over documents is the same as over prompts, and
+11. **A protected document is only as protected as detection was.** Every
+    control in this phase is exact — the splice, the batching, the span-count
+    guard — and all of them operate on the spans detection found. What
+    detection missed is in the outbound text, and no count anywhere will say
+    so. This is the same residual risk `docs/threat-model.md` names, arriving
+    at the point where the text leaves.
+12. **Detection quality over documents is the same as over prompts, and
     unmeasured.** `docs/threat-model.md` names detection quality as the largest
     residual risk in the system; running the same recognizers over a document
     applies the same recall to far more text. Nothing here has been evaluated
     against a labelled corpus.
-12. **A tenant cannot tighten the document entity budget.**
+13. **A tenant cannot tighten the document entity budget.**
     `MAX_DOCUMENT_ENTITIES` is a deployment setting. The policy schema has no
     per-tenant field for it, because `PolicyDocument.max_entities` is sized for
     a chat request and applying it to a document would refuse ordinary ones.

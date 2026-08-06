@@ -563,7 +563,7 @@ class TestAnalyzedDocumentInvariants:
             document_id=DOCUMENT,
             segmented=segmented_of(text, max_characters=1_000, overlap=0),
             spans=spans,
-            policy_version=7,
+            policy=policy(),
         )
 
     def _span(self, start: int, end: int, entity_type: str = PERSON) -> LabeledSpan:

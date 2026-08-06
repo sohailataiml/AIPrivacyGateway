@@ -929,6 +929,39 @@ naming the type and never the value; an over-budget document raises
 
 ---
 
+## 9.14 Document Protection
+
+Applies the labeled spans and persists the mappings they need. **Nothing invokes
+it yet**: `DocumentProtector` is assembled by the composition root, but no route
+reaches it and no other module calls it. It becomes reachable in the phase that
+sends a document to a provider.
+
+`app/documents/protection.py` is one module, and it **calls the prompt
+tokenizer** rather than implementing a second one (ADR-0033). The two things a
+document-specific implementation would duplicate are the two where a mistake is
+silent: the splice runs right to left because every offset indexes the original
+string, and mappings are minted in one call (ADR-0022).
+
+Three things make that reuse safe:
+
+| Concern | Answer |
+|---|---|
+| Which policy | The snapshot `AnalyzedDocument` carries. Re-resolving could apply actions the labels never agreed to |
+| Which budget | `MAX_DOCUMENT_ENTITIES`, substituted through a read-through view. The tokenizer's own ceiling is per-request |
+| Which session | The caller's. A token resolves only in the session it was minted in |
+
+The tokenizer re-derives actions from the policy it is given, and the protector
+**verifies the derivation reproduced the labels** — refusing a result that acted
+on a different number of spans than were labeled, rather than sending text with
+an original still in it.
+
+`ProtectedDocument` is the provider checkpoint, the document-shaped counterpart
+of `ProtectedChatRequest`. It carries no mappings; the originals are in the
+vault. A blocked entity type is refused by detection, before protection begins,
+so a document destined to fail reaches no vault call.
+
+---
+
 ## 10. API Contract Summary
 
 ### `POST /v1/chat`
@@ -1336,6 +1369,7 @@ secure-ai-gateway/
 │   │   ├── segmentation.py
 │   │   ├── service.py
 │   │   ├── validation.py
+│   │   ├── protection.py
 │   │   ├── analysis/
 │   │   │   ├── analyzer.py
 │   │   │   ├── models.py

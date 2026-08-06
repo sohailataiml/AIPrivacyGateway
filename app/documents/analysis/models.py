@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from app.documents.segmentation import SegmentedDocument
+    from app.policy.models import PolicySnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,9 +108,17 @@ class AnalyzedDocument:
     document_id: UUID
     segmented: SegmentedDocument
     spans: tuple[LabeledSpan, ...]
-    policy_version: int
-    """The policy that produced the actions. Recorded so a later decision can be
-    explained against the rules that were actually in force."""
+    policy: PolicySnapshot
+    """The exact snapshot that produced the actions, not just its version.
+
+    The snapshot rather than the number because the phase that protects a
+    document must apply *these* decisions. Policy is cached for 30 seconds and
+    an operator can edit it at any moment, so a protector that resolved the
+    policy again could get a different one and splice actions the labels never
+    agreed to — with both stages individually correct and every count reporting
+    success. Carrying the snapshot makes that divergence unrepresentable rather
+    than unlikely.
+    """
 
     def __post_init__(self) -> None:
         limit = len(self.segmented.document.text)
@@ -121,6 +130,11 @@ class AnalyzedDocument:
             if span.end > limit:
                 raise ValueError(f"span {index} extends past the end of the document text")
             previous_end = span.end
+
+    @property
+    def policy_version(self) -> int:
+        """Derived, so it cannot name a version other than the policy's own."""
+        return self.policy.version
 
     @property
     def span_count(self) -> int:

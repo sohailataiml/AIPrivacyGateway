@@ -1000,6 +1000,36 @@ allowlist. See PROGRESS.md defect 20.
 
 ---
 
+## 20c. Phase 15d — Document Protection
+
+Applies the labeled spans and persists the mappings they need. The outbound
+scan, the provider call, restoration, and audit for documents are **not** in
+this phase. See ADR-0033, ADR-0022, and `docs/document-processing.md`.
+
+### Tasks
+
+- [x] `DocumentProtector` calling the **prompt tokenizer**, not a second
+      implementation of the right-to-left splice or the batched mint.
+- [x] `AnalyzedDocument` carries its `PolicySnapshot`, so protection applies the
+      rules detection decided under rather than re-resolving them.
+- [x] `_DocumentEntityBudget` — the snapshot with `MAX_DOCUMENT_ENTITIES`
+      substituted, because the tokenizer's ceiling is the per-request one.
+- [x] `session_id` as a parameter: a token resolves only in the session it was
+      minted in, so it must be the session that will quote it.
+- [x] Verify the tokenizer's re-derivation reproduced the labels, and refuse a
+      result that acted on a different number of spans.
+- [x] `ProtectedDocument` as the provider checkpoint, carrying no mappings.
+- [x] Wire `DocumentProtector` in the composition root, sharing the pipeline's
+      tokenizer and therefore its vault, pepper, and token grammar.
+
+**No routes, no migration, and no new `DocumentStatus` member.**
+
+**Verified 2026-08-05.** Against the real tokenizer and a vault that mints real
+tokens under the real grammar; the vault seam is asserted behaviourally, by
+resolving a document's token through the chat path's vault.
+
+---
+
 
 ## 17. Phase 16 — Frontend Bootstrap
 

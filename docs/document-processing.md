@@ -2,31 +2,31 @@
 
 Extends the prompt pipeline to uploaded files.
 
-**Phase 1 (secure storage), Phase 2 (extraction and segmentation), and Phase 3
-(detection and labeled spans) are built.** Everything from `Protect` onward is
-still specification for documents. This document marks the boundary explicitly
-at each step, because the most useful thing a design document can tell a reader
+**Phase 1 (secure storage), Phase 2 (extraction and segmentation), Phase 3
+(detection and labeled spans), and Phase 4 (protection) are built.** Everything
+from the outbound scan onward is still specification for documents. This
+document marks the boundary explicitly at each step, because the most useful thing a design document can tell a reader
 is which half of it is true today.
 
 ## Pipeline
 
 ```text
-Upload → Validate → Encrypt and store → Extract → Segment → Detect │ Protect
-                                                                   │ → Batch vault write
-        ────────────────────────── built ───────────────────────── ┤ → Outbound scan
-                                                                   │ → LLM → Restore
-                                                                   └── specified ──────
+Upload → Validate → Encrypt and store → Extract → Segment → Detect → Protect │ Outbound scan
+                                                          → Batch vault write │ → LLM
+        ───────────────────────────── built ───────────────────────────────── ┤ → Restore
+                                                                              └── specified ──
 ```
 
-The stages after `Detect` are the existing prompt pipeline. What document
-processing adds is everything before it, plus segmentation and the merge that
-turns per-segment detections back into one set of document spans.
+What document processing adds is everything before the outbound scan: storage,
+extraction, segmentation, the merge that turns per-segment detections back into
+one set of document spans, and the splice that replaces them. The stages after
+are the existing prompt pipeline.
 
-**Nothing calls analysis yet.** `DocumentAnalyzer` is assembled in the
+**Nothing calls protection yet.** `DocumentProtector` is assembled in the
 composition root, but no route reaches it and no other module invokes it. It
-becomes reachable in the phase that protects a document. Phase 3 added **no
-routes, no migration, and no new `DocumentStatus` member** — for the same
-reason Phase 2 added none, now written down as ADR-0032.
+becomes reachable in the phase that sends a document to a provider. Phase 4
+added **no routes, no migration, and no new `DocumentStatus` member** — for the
+same reason Phases 2 and 3 added none (ADR-0032).
 
 ## Storage — built
 
@@ -270,12 +270,36 @@ there is nothing for a status to describe.
 Counts are derived from the spans on each call rather than stored, so a summary
 cannot disagree with what will actually be protected.
 
-## Vault interaction — specified
+## Protection — built
 
-A document produces far more entities than a prompt does. Mapping writes are
-batched (ADR-0022); a per-token round trip makes the benchmark targets in
-[performance.md](performance.md) unreachable. The batch protocol itself is
-built; nothing in the document path calls it yet.
+Applying the labeled spans, and the last stage before a document could be sent
+anywhere. `DocumentProtector` **calls the prompt tokenizer** rather than
+implementing a second one (ADR-0033), because the two things it would duplicate
+are the two where a mistake is silent: the splice runs **right to left** (every
+offset indexes the original string) and mappings are minted in **one call**
+(ADR-0022 — a round trip per span is arithmetically fatal on a document).
+
+Three things have to line up for that reuse to be safe, and they are most of
+the module:
+
+| Concern | Answer |
+|---|---|
+| Which policy applies | The snapshot `AnalyzedDocument` carries, not a re-resolution. Policy is cached for 30s and editable at any moment; re-resolving could apply actions the labels never agreed to |
+| Which entity budget applies | `MAX_DOCUMENT_ENTITIES`, substituted through a read-through view of the snapshot. The tokenizer's own ceiling is the per-*request* one and would refuse documents analysis accepted |
+| Which session the tokens belong to | The caller's. A token minted in one session resolves in no other, so a document's tokens must be minted in the session that will quote them |
+
+The tokenizer re-derives actions from the policy it is handed, so the derivation
+reproduces the labels — and the protector **checks that it did**, refusing a
+result that acted on a different number of spans than were labeled. A silently
+dropped span would otherwise mean text with an original still in it and a
+summary calling the document protected.
+
+`ProtectedDocument` is the provider checkpoint, the document-shaped counterpart
+of `ProtectedChatRequest`. It carries no mappings: the originals are in the
+vault, which is where restoration reads them.
+
+A blocked entity type is refused by *analysis*, before protection begins, so a
+document destined to fail reaches no vault call and leaves no TTL to wait out.
 
 ## Failure behaviour — built for storage
 
@@ -317,12 +341,12 @@ TEST_OBJECT_STORE_ENDPOINT=http://localhost:9000 \
     pytest tests/integration/test_documents_minio.py -m integration
 ```
 
-## What Phase 3 does not do
+## What Phase 4 does not do
 
-No tokenization, vault interaction, provider call, restoration, or audit for
-documents. No route reaches analysis, no `DocumentStatus` member was added, and
-no migration was written. `DocumentAnalyzer` is composed by the composition root
-and is invoked by nothing.
+No outbound scan, provider call, restoration, or audit for documents. No route
+reaches protection, no `DocumentStatus` member was added, and no migration was
+written. `DocumentProtector` is composed by the composition root and is invoked
+by nothing.
 
 Two limits worth stating rather than discovering:
 
@@ -348,6 +372,7 @@ Two limits worth stating rather than discovering:
 - ADR-0030 — do not persist extracted plaintext
 - ADR-0031 — merge document detections on global offsets
 - ADR-0032 — readiness is a type, not a status
+- ADR-0033 — protect documents with the prompt tokenizer
 - ADR-0002 — Presidio as the detection engine
 - ADR-0014 — policy-driven entity actions
 - ADR-0008 — fail closed

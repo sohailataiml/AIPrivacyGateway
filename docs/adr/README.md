@@ -84,21 +84,23 @@ behavior**, and **local infrastructure choices**.
 These extend the rule to three more areas: **where untrusted parsing runs**,
 **how offsets are represented**, and **what may be written down**.
 
-## Document Detection ADRs
+## Document Detection and Protection ADRs
 
 | ADR | Decision | Status |
 |---|---|---|
 | [0031](0031-merge-document-detections-on-global-offsets.md) | Merge document detections on global offsets, then apply policy | Accepted |
 | [0032](0032-readiness-is-a-type-not-a-status.md) | Readiness for protection is a type, not a document status | Accepted |
+| [0033](0033-protect-documents-with-the-prompt-tokenizer.md) | Protect documents with the prompt tokenizer, not a second one | Accepted |
 
-Two more areas: **how detections from overlapping segments become one set of
-spans**, and **how a document says it is ready for the next stage**. ADR-0032
-extends ADR-0030 rather than qualifying it — because nothing is persisted, there
-is nothing for a status to describe.
+Three more areas: **how detections from overlapping segments become one set of
+spans**, **how a document says it is ready for the next stage**, and **where the
+splice and the vault write happen**. ADR-0032 extends ADR-0030 rather than
+qualifying it — because nothing is persisted, there is nothing for a status to
+describe.
 
 ### ADRs with an "As Built" section
 
-Most ADRs here record a decision that has not yet been implemented. Seven record
+Most ADRs here record a decision that has not yet been implemented. Eight record
 decisions that have been, and carry an **As Built** section describing the
 shipped reality — the wire format, the derivation, the AAD fields, the isolation
 mechanism — and explicitly what the phase did *not* build:
@@ -110,6 +112,7 @@ mechanism — and explicitly what the phase did *not* build:
 - [0030](0030-do-not-persist-extracted-text.md) — extracted-text retention
 - [0031](0031-merge-document-detections-on-global-offsets.md) — span merging
 - [0032](0032-readiness-is-a-type-not-a-status.md) — the protection checkpoint
+- [0033](0033-protect-documents-with-the-prompt-tokenizer.md) — document protection
 
 Where an ADR has an As Built section, that section is the one to check code
 against. The Decision above it says what was agreed; the As Built section says

@@ -34,6 +34,7 @@ from app.db.models import Policy, Tenant
 from app.db.session import build_session_factory
 from app.documents.analysis.analyzer import DocumentAnalyzer
 from app.documents.models import CONTENT_TYPE_TXT
+from app.documents.protection import DocumentProtector
 from app.documents.storage.fakes import FakeDocumentStore
 from app.domain.errors import DocumentNotFoundError
 from app.policy.defaults import DEFAULT_POLICY
@@ -131,8 +132,43 @@ class TestComposition:
             assert built.documents is None
             assert built.document_processor is None
             assert built.document_analyzer is None
+            assert built.document_protector is None
         finally:
             await stop_services(built)
+
+    async def test_a_protector_is_assembled_when_documents_are_enabled(
+        self, services: Services
+    ) -> None:
+        assert isinstance(services.document_protector, DocumentProtector)
+
+    async def test_a_document_token_resolves_through_the_pipeline_vault(
+        self, services: Services
+    ) -> None:
+        # Asserted behaviourally rather than by comparing object identities,
+        # because the property that matters is not "the same object" but "the
+        # chat path can read what the document path wrote".
+        #
+        # A second vault would mint tokens the restoration stage cannot resolve,
+        # and the only symptom would be opaque strings surviving into an answer
+        # -- a failure that looks like a model quirk rather than a wiring bug.
+        assert services.document_protector is not None
+        session_id = uuid4()
+        document_id = await upload(services)
+
+        protected = await services.document_protector.protect(
+            tenant_id=TENANT, user_id=USER, session_id=session_id, document_id=document_id
+        )
+
+        tokens = [
+            word.strip(".,\n")
+            for word in protected.text.split()
+            if word.strip(".,\n").startswith("⟦SGW:") and ":REDACTED:" not in word
+        ]
+        assert tokens, "non-vacuity: the default policy tokenizes the email in BODY"
+        resolved = await services.vault.resolve_many(
+            tenant_id=TENANT, session_id=session_id, tokens=set(tokens)
+        )
+        assert CANARIES["email"] in set(resolved.values())
 
     async def test_the_analyzer_shares_the_pipeline_detector(self, services: Services) -> None:
         # Identity, not equality. Two separately configured detectors would let

@@ -37,6 +37,7 @@ from app.documents.analysis.analyzer import DocumentAnalyzer
 from app.documents.crypto import DocumentCipher
 from app.documents.extraction.runner import SubprocessExtractionRunner
 from app.documents.processing import DocumentProcessor
+from app.documents.protection import DocumentProtector
 from app.documents.protocol import DocumentStore
 from app.documents.segmentation import Segmenter
 from app.documents.service import DocumentService
@@ -87,9 +88,16 @@ class Services:
     document_analyzer: DocumentAnalyzer | None
     """Detection over documents. Present exactly when ``documents`` is.
 
-    Nothing calls it yet -- no route reaches document detection until the phase
-    that protects a document. It owns no handle of its own, so it needs no
-    closer: the processor it reads through is closed on its own line below.
+    Reached only through ``document_protector``. It owns no handle of its own,
+    so it needs no closer: the processor it reads through is closed below.
+    """
+
+    document_protector: DocumentProtector | None
+    """Tokenization over documents. Present exactly when ``documents`` is.
+
+    Nothing calls it yet -- no route reaches document protection until the phase
+    that sends one to a provider. It shares the pipeline's tokenizer, so it
+    shares the vault, the fingerprint pepper, and the token grammar.
     """
 
     def session_scope(self) -> AbstractAsyncContextManager[AsyncSession]:
@@ -175,6 +183,15 @@ async def build_services(
         if document_processor is not None
         else None
     )
+    document_protector = (
+        DocumentProtector(
+            analysis=document_analyzer,
+            tokenizer=tokenizer,
+            max_entities=settings.max_document_entities,
+        )
+        if document_analyzer is not None
+        else None
+    )
 
     return Services(
         settings=settings,
@@ -189,6 +206,7 @@ async def build_services(
         documents=documents,
         document_processor=document_processor,
         document_analyzer=document_analyzer,
+        document_protector=document_protector,
     )
 
 

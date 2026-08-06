@@ -193,7 +193,7 @@ class DocumentAnalyzer:
             document_id=document_id,
             segmented=segmented,
             spans=label(resolved, document=segmented.document, policy=policy),
-            policy_version=policy.version,
+            policy=policy,
         )
 
         # Identifiers, a version, and counts. Never a value and never an
