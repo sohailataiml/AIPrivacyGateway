@@ -386,6 +386,72 @@ docker compose exec minio mc cat l/sgw-documents/<key> | strings | head
 
 ---
 
+## 5b. Deployed to Render — unfinished, read this first
+
+Live at **https://sgw-workspace.onrender.com/chat** and
+**https://sgw-api.onrender.com**. Created via the Render API, not the
+dashboard, so `render.yaml` and the running services can drift — treat the
+services as the truth and fold changes back into the file.
+
+| Resource | Id | State |
+|---|---|---|
+| Workspace | `srv-d9qg5ps9v7es73eu0cm0` | ✅ serving |
+| API | `srv-d9qg5p6gekts7395t9cg` | ✅ live, **not ready** |
+| Postgres | `dpg-d9qfuhvavr4c73fgktu0-a` | ✅ up, **no schema** |
+| Key Value | `red-d9qg2v2jobas7381ju2g` | ✅ up |
+| Object store | `srv-d9qg539t0dsc7380lkeg` | ❌ down |
+
+### Two things block a working demo
+
+**1. The object store is down.** `/health/ready` reports
+`object_store: down`. Two causes, one fixed in `render.yaml` and neither yet
+live:
+
+* Render routes a private service on **port 10000**; MinIO defaults to 9000.
+  The running container is still on 9000 because every failed update rolls
+  back to the last working config.
+* The `sh -c "…"` wrapper that pre-creates the bucket is mangled by Render's
+  command parsing — it fails with
+  `sh: line 1: <entire string>: No such file or directory`.
+
+Untangle them rather than fixing both at once: set `dockerCommand` to plain
+`minio server /data --address :10000` (no shell, nothing to misquote), then
+create the bucket from Render's dashboard shell:
+
+```bash
+mc alias set l http://127.0.0.1:10000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD
+mc mb l/sgw-documents
+```
+
+**2. Migrations have never run.** `alembic upgrade head` against the Render
+Postgres, before first use. Skipping it reproduces the local failure exactly:
+the first audit write fails on missing `outbound_hmac`/`outbound_scan`
+columns, `AuditService` latches into `degraded`, and every request afterwards
+returns `AUDIT_UNAVAILABLE` until the service restarts. Fixing the schema is
+not enough on its own — the latch needs a restart.
+
+**Order matters and is easy to get wrong:** rebuild → migrate → restart →
+smoke test. Getting it wrong is what produced the latch locally.
+
+### Also outstanding
+
+* **`deploy.secrets.txt`** in the repo root holds the production secrets.
+  Gitignored, generated in-process, never printed to a terminal. Store them
+  somewhere safe and delete the file.
+* **The demo needs an API key to be usable.** A hiring partner opening the URL
+  hits the paste-a-key gate. The fix is a **server-side proxy** in the
+  workspace — a route handler that attaches a demo key from a plain
+  `GATEWAY_DEMO_API_KEY` (never `NEXT_PUBLIC_*`, which bakes it into the
+  client bundle). That keeps ADR-0019 intact and makes CORS irrelevant, since
+  everything becomes same-origin.
+* **No frontend tests, still.** Four defects reached a user in one session —
+  the CSP blocking hydration, a stale image, an error parser that disguised
+  the failure, and the migration ordering. All four passed `build`, `lint`,
+  `typecheck`, and 1,672 green backend tests, because none of those execute a
+  page or check which commit an image was built from.
+
+---
+
 ## 6. Next steps, in order
 
 0. **Run the batch-vault integration tests against real Redis.** Everything in
