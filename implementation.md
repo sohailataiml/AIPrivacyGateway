@@ -1093,10 +1093,16 @@ PROGRESS.md §4.
 
 ## 17. Phase 16 — Frontend Bootstrap
 
+**Partially done.** `frontend/` exists as a Next.js App Router application with
+Tailwind, strict TypeScript, ESLint, and browser security headers, and it serves
+the secure chat workspace. Vitest, React Testing Library, and Playwright are
+installed or planned but no component or E2E test is written yet, so the UI has
+**no automated coverage** -- verified by hand only.
+
 ### Tasks
 
-- [ ] Create `frontend/` as a Next.js TypeScript application using the App Router.
-- [ ] Configure Tailwind CSS and accessible UI primitives.
+- [x] Create `frontend/` as a Next.js TypeScript application using the App Router.
+- [x] Configure Tailwind CSS and accessible UI primitives.
 - [ ] Configure ESLint, formatting, TypeScript strict mode, Vitest, React Testing Library, and Playwright.
 - [ ] Add application shell, sidebar, header, loading states, empty states, and error boundary.
 - [ ] Implement one typed gateway API client.

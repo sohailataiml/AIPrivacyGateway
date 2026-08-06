@@ -66,6 +66,7 @@ Where the two disagree, trust the test suite.
 | 16c | Document protection | 7/7 | ✅ Complete; reached through 16d |
 | 16d | Outbound attestation and the document route | 7/7 | ✅ Complete; the document path now runs end to end |
 | 16e | Shared outbound boundary and instruction protection | 6/6 | ✅ Complete; ADR-0024 satisfied on both routes |
+| 16f | Secure chat workspace (frontend) | 4/12 | ⚠️ Chat, document upload, and Privacy Inspector build and run; **no frontend tests at all** |
 | 17 | Test strategy | mixed | ⚠️ See §4 |
 | 18 | Performance tests | 0/6 | ❌ Not started |
 | 24 | Manual security verification | 0/16 | ❌ Not started |
@@ -288,6 +289,14 @@ Read these before trusting a checkmark.
   and `DATE_TIME` at 0.85 once a sentence precedes it. Per-message scanning
   matches how protection ran. An entity genuinely spanning two messages goes
   unreported; the claim that no real value does is a judgement, not a proof.
+- **The frontend has no automated tests.** `frontend/` builds, typechecks, and
+  lints clean, and the workspace has been exercised by hand — but there is no
+  component test, no Playwright flow, and no CI job for it. Every backend claim
+  in this file is backed by a suite; nothing in the UI is. Treat it as
+  demonstrated, not verified.
+- **Only the workspace exists.** `architecture.md` §22.7–22.12 specify a
+  dashboard, session explorer, audit explorer, policy manager, and provider
+  pages. None are built, and most need read APIs the backend does not expose.
 - **Instruction protection costs a second vault batch.** The document and the
   instruction are two `transform` calls under one session. ADR-0022 forbids a
   round trip per *token*, not per message, so this is inside the rule — but it
