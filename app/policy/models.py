@@ -60,6 +60,8 @@ MAX_ENTITY_TYPE_CHARS: Final[int] = 64
 MAX_PROVIDER_ALIAS_CHARS: Final[int] = 64
 MAX_MODEL_ALIAS_CHARS: Final[int] = 128
 MAX_POLICY_NAME_CHARS: Final[int] = 64
+MAX_RECOGNIZER_CHARS: Final[int] = 64
+MAX_DESCRIPTION_CHARS: Final[int] = 280
 
 MAX_SESSION_TTL_SECONDS: Final[int] = 86_400
 """One day. A mapping that outlives its conversation is a liability, not a feature."""
@@ -80,13 +82,53 @@ ModelAlias = Annotated[
 
 
 class EntityRule(BaseModel):
-    """What the policy does with one entity type, and how sure it must be."""
+    """What the policy does with one entity type, and how sure it must be.
+
+    ``action`` and ``min_score`` are the two fields the pipeline reads. The rest
+    are operator-facing: they exist so the management UI can present a rule the
+    way an operator thinks about it, and they are all optional with defaults so
+    that every document written before they existed still parses to exactly the
+    behaviour it had. ``extra="forbid"`` means adding them here is what makes
+    them writable at all -- before this they would have been rejected as typos.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     action: EntityAction
     min_score: float = Field(ge=0.0, le=1.0)
     """Required, not defaulted. A silent threshold is a threshold nobody reviews."""
+
+    enabled: bool = True
+    """Whether this rule is applied at all.
+
+    A disabled rule is dropped from the snapshot, so the entity type resolves
+    through :data:`UNKNOWN_ENTITY_ACTION` -- which is ``TOKENIZE``, not
+    ``ALLOW``. Disabling a rule therefore removes *this configuration*, it does
+    not permit the value through. An operator who wants a type sent in the clear
+    must say so with ``action=ALLOW``, which is a deliberate, reviewable edit
+    rather than a side effect of a checkbox.
+    """
+
+    priority: int | None = Field(default=None, ge=0, le=1000)
+    """Operator-assigned ordering hint. Not read by overlap resolution.
+
+    Severity-first resolution (`app/detection/overlap.py`) decides which of two
+    overlapping spans wins, and it does so from the action's severity rather
+    than from a number in the policy. This field is recorded and displayed; it
+    is deliberately not wired into that algorithm, because quietly letting a
+    policy reorder overlap resolution would change detection behaviour that
+    Phase 3 pinned down with tests.
+    """
+
+    recognizer: str | None = Field(default=None, max_length=MAX_RECOGNIZER_CHARS)
+    """Which recognizer the operator expects to supply this type.
+
+    Descriptive. The detector chooses its own recognizers; naming one here does
+    not install or configure it.
+    """
+
+    description: str | None = Field(default=None, max_length=MAX_DESCRIPTION_CHARS)
+    """Why this rule exists, for whoever reads the policy next."""
 
 
 class ProviderRule(BaseModel):
@@ -184,7 +226,16 @@ class PolicySnapshot:
         tenant_id: UUID,
         version: int,
     ) -> Self:
-        """Build a snapshot from an already-validated document."""
+        """Build a snapshot from an already-validated document.
+
+        Disabled rules are dropped here rather than carried and checked at every
+        lookup. The pipeline then treats those types as unconfigured, which
+        routes them through ``UNKNOWN_ENTITY_ACTION`` -- ``TOKENIZE`` -- so a
+        disabled rule protects the value rather than releasing it.
+
+        Documents written before ``enabled`` existed default it to ``True``, so
+        this filter is a no-op for every policy already stored.
+        """
         return cls(
             policy_id=policy_id,
             tenant_id=tenant_id,
@@ -193,7 +244,12 @@ class PolicySnapshot:
             session_ttl_seconds=document.session_ttl_seconds,
             max_entities=document.max_entities,
             unknown_output_token_action=document.unknown_output_token_action,
-            entities=tuple(sorted(document.entities.items(), key=lambda item: item[0])),
+            entities=tuple(
+                sorted(
+                    ((name, rule) for name, rule in document.entities.items() if rule.enabled),
+                    key=lambda item: item[0],
+                )
+            ),
             providers=tuple(
                 sorted(
                     ((alias, tuple(rule.models)) for alias, rule in document.providers.items()),

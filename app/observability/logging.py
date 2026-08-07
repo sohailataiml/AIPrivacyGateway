@@ -83,6 +83,19 @@ ALLOWED_EVENT_KEYS: Final[frozenset[str]] = frozenset(
         "timeout_seconds",
         "operation",
         "failure_type",
+        # Policy management (ADR-0037). Names, version numbers, counts, and
+        # outcomes -- all Internal. The policy *document* is not here and never
+        # will be: an operator may type a real identifier into a rule's
+        # description while drafting, so the document is data this allowlist
+        # exists to keep out of logs, not metadata to correlate on.
+        "policy_name",
+        "from_version",
+        "to_version",
+        "policy_status",
+        "change_count",
+        "valid",
+        "problem_count",
+        "warning_count",
     }
 )
 

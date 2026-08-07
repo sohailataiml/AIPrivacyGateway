@@ -42,6 +42,9 @@ TENANT_STATUSES = (TENANT_STATUS_ACTIVE, TENANT_STATUS_SUSPENDED)
 
 API_KEY_STATUS_ACTIVE = "active"
 API_KEY_STATUS_REVOKED = "revoked"
+
+POLICY_STATUS_DRAFT = "draft"
+POLICY_STATUS_PUBLISHED = "published"
 API_KEY_STATUSES = (API_KEY_STATUS_ACTIVE, API_KEY_STATUS_REVOKED)
 
 SECRET_REF_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
@@ -152,6 +155,21 @@ class Policy(Base):
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="false"
     )
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default=POLICY_STATUS_PUBLISHED,
+        server_default=POLICY_STATUS_PUBLISHED,
+    )
+    """``draft`` or ``published``. A published row is never updated in place.
+
+    Defaulted to ``published`` so every row that existed before this column did
+    is treated as immutable, which is what it was: there was no way to write a
+    draft, so nothing already stored can be one.
+    """
+
+    published_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    """When this version was published. ``NULL`` while it is still a draft."""
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         UtcDateTime, nullable=False, default=utc_now, onupdate=utc_now
@@ -169,7 +187,22 @@ class Policy(Base):
             sqlite_where=text("tenant_id IS NULL"),
             postgresql_where=text("tenant_id IS NULL"),
         ),
+        # At most one draft per policy name. Without this, two concurrent
+        # "create draft" calls both succeed and the second silently orphans the
+        # first operator's edits.
+        Index(
+            "uq_policies_one_draft_per_name",
+            "tenant_id",
+            "name",
+            unique=True,
+            sqlite_where=text("status = 'draft'"),
+            postgresql_where=text("status = 'draft'"),
+        ),
         CheckConstraint("version > 0", name="version_positive"),
+        CheckConstraint(
+            "status IN ('draft', 'published')",
+            name="policy_status_known",
+        ),
     )
 
 

@@ -144,6 +144,21 @@ def snapshot_of(document: PolicyDocument, *, version: int = 1) -> PolicySnapshot
 # ---------------------------------------------------------------------------
 def test_default_policy_matches_the_documented_example() -> None:
     # Arrange
+    # The operator-facing fields added for the management UI (ADR-0037) carry
+    # defaults, so they appear in the dump. They are asserted here rather than
+    # filtered out: this test exists to catch the default policy changing
+    # meaning, and "every rule is enabled with no recognizer pinned" is part of
+    # what it currently means.
+    def rule(action: str, min_score: float) -> dict[str, object]:
+        return {
+            "action": action,
+            "min_score": min_score,
+            "enabled": True,
+            "priority": None,
+            "recognizer": None,
+            "description": None,
+        }
+
     expected = {
         "schema_version": 1,
         "name": "default",
@@ -151,12 +166,12 @@ def test_default_policy_matches_the_documented_example() -> None:
         "max_entities": 500,
         "providers": {"openai-primary": {"models": ["general-chat"]}},
         "entities": {
-            "EMAIL_ADDRESS": {"action": "tokenize", "min_score": 0.7},
-            "PHONE_NUMBER": {"action": "tokenize", "min_score": 0.4},
-            "US_SSN": {"action": "block", "min_score": 0.5},
-            "CREDIT_CARD": {"action": "block", "min_score": 0.5},
-            "PERSON": {"action": "tokenize", "min_score": 0.75},
-            "LOCATION": {"action": "tokenize", "min_score": 0.8},
+            "EMAIL_ADDRESS": rule("tokenize", 0.7),
+            "PHONE_NUMBER": rule("tokenize", 0.4),
+            "US_SSN": rule("block", 0.5),
+            "CREDIT_CARD": rule("block", 0.5),
+            "PERSON": rule("tokenize", 0.75),
+            "LOCATION": rule("tokenize", 0.8),
         },
         "unknown_output_token_action": "preserve",
     }
@@ -166,6 +181,9 @@ def test_default_policy_matches_the_documented_example() -> None:
 
     # Assert
     assert actual == expected
+    # The threshold that matters most, stated separately so a careless edit to
+    # the block above cannot quietly restore the 0.65 that leaked phone numbers.
+    assert DEFAULT_POLICY.entities["PHONE_NUMBER"].min_score == 0.4
 
 
 def test_default_policy_passes_the_validator_it_ships_with() -> None:

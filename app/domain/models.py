@@ -279,6 +279,27 @@ class Scope(StrEnum):
     DOCUMENTS_READ = "documents:read"
     DOCUMENTS_DELETE = "documents:delete"
 
+    POLICIES_READ = "policies:read"
+    """View policies, versions, diffs, and the detector catalog."""
+
+    POLICIES_WRITE = "policies:write"
+    """Create and edit a draft, and publish it as a new version.
+
+    Separate from ``POLICIES_READ`` because the split is the whole authorization
+    model for this surface: an analyst reviews what the gateway is enforcing, an
+    administrator changes it. Publishing alters what every subsequent request is
+    protected by, so it is not something a read credential should reach.
+    """
+
+    POLICIES_TEST = "policies:test"
+    """Run text through detection and a chosen policy without invoking a provider.
+
+    Distinct from ``POLICIES_READ`` because it accepts caller-supplied text and
+    spends detector time, and distinct from ``DETECT_INVOKE`` because it answers
+    a different question -- what *would* this policy do -- and never tokenizes,
+    writes a vault mapping, or calls a provider.
+    """
+
 
 @dataclass(frozen=True, slots=True)
 class Principal:
