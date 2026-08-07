@@ -22,10 +22,19 @@ import { NextResponse, type NextRequest } from "next/server";
  * explicitly rather than left on -- the production bundle has no such need, and
  * an allowance that survives into production is the kind that stops being
  * noticed.
+ *
+ * **This file must be `proxy.ts`, exporting `proxy`.** Next 16 deprecated the
+ * `middleware` convention and renamed it. The old name still *runs* -- it set
+ * this very header -- but the nonce it puts on the request no longer reaches
+ * the renderer, so every script tag shipped without one and `'strict-dynamic'`
+ * blocked the lot. The page then served 200 with correct-looking markup and no
+ * React at all: buttons did nothing, and the file picker opened (a native
+ * `<label for>` behaviour needing no JS) while `onChange` never fired. Renaming
+ * the file is the entire fix, and nothing in a build, a lint, or a status check
+ * can see it.
  */
 
 const isDevelopment = process.env.NODE_ENV === "development";
-const gatewayOrigin = process.env.NEXT_PUBLIC_GATEWAY_ORIGIN ?? "http://localhost:8000";
 
 function policyFor(nonce: string): string {
   return [
@@ -36,10 +45,11 @@ function policyFor(nonce: string): string {
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
     "font-src 'self'",
-    // The browser talks to this app and to the gateway. It has no business
-    // reaching a provider, Redis, or PostgreSQL, and saying so here turns an
-    // accidental direct call into a visible failure.
-    `connect-src 'self' ${gatewayOrigin}${isDevelopment ? " ws: wss:" : ""}`,
+    // 'self' alone, because the browser now talks only to this origin: the
+    // client calls `/api`, which the route handler forwards server-side. Any
+    // direct call to a gateway origin is therefore a bug, and this turns it
+    // into a visible console failure rather than a silent bypass of the proxy.
+    `connect-src 'self'${isDevelopment ? " ws: wss:" : ""}`,
     "frame-ancestors 'none'",
     "object-src 'none'",
     "base-uri 'self'",
@@ -47,7 +57,7 @@ function policyFor(nonce: string): string {
   ].join("; ");
 }
 
-export function middleware(request: NextRequest): NextResponse {
+export function proxy(request: NextRequest): NextResponse {
   const nonce = crypto.randomUUID().replaceAll("-", "");
   const policy = policyFor(nonce);
 
@@ -63,11 +73,20 @@ export function middleware(request: NextRequest): NextResponse {
 }
 
 export const config = {
-  // Static assets and images do not execute script and do not need a per-request
-  // nonce; excluding them keeps the middleware off the hot path for every chunk.
+  // `api` is excluded, and that is load-bearing rather than an optimisation.
+  // Proxy runs on the Node.js runtime in Next 16 and re-issues the request with
+  // mutated headers; doing that to `/api/[...path]` consumed the body stream the
+  // route handler forwards upstream, so every POST failed with a bare "fetch
+  // failed" while GET went through untouched. A route handler renders no HTML
+  // and has no script tag to carry a nonce, so it gains nothing from the policy
+  // anyway -- the responses it returns are JSON the browser never executes.
+  //
+  // Static assets and images are excluded for the ordinary reason: they do not
+  // execute script and do not need a per-request nonce, and skipping them keeps
+  // this off the hot path for every chunk.
   matcher: [
     {
-      source: "/((?!_next/static|_next/image|favicon.ico).*)",
+      source: "/((?!api|_next/static|_next/image|favicon.ico).*)",
       missing: [
         { type: "header", key: "next-router-prefetch" },
         { type: "header", key: "purpose", value: "prefetch" },

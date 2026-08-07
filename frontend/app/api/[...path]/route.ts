@@ -28,7 +28,13 @@ import { NextResponse, type NextRequest } from "next/server";
  * undo the streaming the upload path is built around.
  */
 
-const GATEWAY = process.env.GATEWAY_ORIGIN ?? "http://localhost:8000";
+// `127.0.0.1`, not `localhost`. Node's fetch resolves `localhost` to `::1`
+// first and does not fall back to IPv4, while docker-compose publishes the
+// gateway on `127.0.0.1:8000` only. The pair fails with a bare "fetch failed",
+// which this route reports as GATEWAY_UNREACHABLE -- and curl hides the problem
+// completely, because curl *does* fall back. Every check that used curl passed
+// while the browser could not reach the gateway at all.
+const GATEWAY = process.env.GATEWAY_ORIGIN ?? "http://127.0.0.1:8000";
 const DEMO_KEY = process.env.GATEWAY_DEMO_API_KEY;
 
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
@@ -60,13 +66,29 @@ async function forward(request: NextRequest, path: string[]): Promise<Response> 
 
   const hasBody = request.method !== "GET" && request.method !== "DELETE";
 
+  // The body is buffered, not streamed, and that is a deliberate retreat.
+  //
+  // This route originally forwarded `request.body` with `duplex: "half"` so a
+  // large upload never had to land in memory. It does not work here: by the
+  // time the handler runs, Next has already consumed the request, so the
+  // stream is disturbed and undici rejects it with `expected non-null body
+  // source`. That surfaces from `fetch` as the entirely generic "fetch
+  // failed", so every POST returned GATEWAY_UNREACHABLE while GET -- having no
+  // body to forward -- worked perfectly. The symptom looked like the gateway
+  // being down, which it never was.
+  //
+  // The cost is real: a 25 MiB upload now occupies 25 MiB here on its way
+  // through. It is bounded rather than unbounded -- the gateway enforces
+  // MAX_DOCUMENT_BYTES and rejects anything larger -- but it is a genuine
+  // regression against the streaming the upload path was built around, and it
+  // is worth revisiting if Next exposes an undisturbed stream again.
+  const body = hasBody ? await request.arrayBuffer() : null;
+
   try {
     const response = await fetch(target, {
       method: request.method,
       headers,
-      body: hasBody ? request.body : undefined,
-      // Required by undici whenever a stream is used as the body.
-      ...(hasBody ? { duplex: "half" } : {}),
+      body,
       redirect: "manual",
       cache: "no-store",
     } as RequestInit);
@@ -77,7 +99,20 @@ async function forward(request: NextRequest, path: string[]): Promise<Response> 
       if (value) proxied.set(name, value);
     }
     return new NextResponse(response.body, { status: response.status, headers: proxied });
-  } catch {
+  } catch (error) {
+    // Logged server-side, returned as nothing. Swallowing it entirely made a
+    // real outage indistinguishable from a bug in this file: "the gateway is
+    // unavailable" was the only evidence available for a failure that was
+    // actually a rejected request shape, and diagnosing it took three wrong
+    // guesses. The cause goes to the server log, where an operator can read it
+    // and a caller cannot.
+    const cause = error instanceof Error ? (error.cause ?? error) : error;
+    console.error("gateway_proxy_failed", {
+      method: request.method,
+      path: path.join("/"),
+      error: error instanceof Error ? error.message : String(error),
+      cause: cause instanceof Error ? cause.message : String(cause),
+    });
     // The gateway's own error envelope, so the client's parser sees one shape
     // whatever went wrong. Nothing about the upstream is disclosed.
     return NextResponse.json(
