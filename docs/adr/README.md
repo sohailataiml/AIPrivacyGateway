@@ -93,6 +93,7 @@ These extend the rule to three more areas: **where untrusted parsing runs**,
 | [0033](0033-protect-documents-with-the-prompt-tokenizer.md) | Protect documents with the prompt tokenizer, not a second one | Accepted |
 | [0034](0034-name-the-object-store-provider.md) | Name the object store provider instead of inferring it | Accepted |
 | [0035](0035-aws-s3-is-the-object-store.md) | AWS S3 is the object store; MinIO removed | Accepted |
+| [0037](0037-immutable-versioned-policies.md) | Immutable versioned policies with a draft-and-publish workflow | Accepted |
 
 Three more areas: **how detections from overlapping segments become one set of
 spans**, **how a document says it is ready for the next stage**, and **where the
@@ -118,6 +119,7 @@ mechanism — and explicitly what the phase did *not* build:
 - [0024](0024-outbound-payload-attestation.md) — outbound attestation, documents only
 - [0034](0034-name-the-object-store-provider.md) — object store provider selection
 - [0035](0035-aws-s3-is-the-object-store.md) — AWS S3 as the only object store
+- [0037](0037-immutable-versioned-policies.md) — policy management, drafts, and the playground
 
 Where an ADR has an As Built section, that section is the one to check code
 against. The Decision above it says what was agreed; the As Built section says

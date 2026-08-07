@@ -100,6 +100,85 @@ nearby, so a higher threshold discarded ordinary phrasings like
 `Call 415-555-0142` and sent them to the provider in the clear. Raising it again
 reopens that leak.
 
+### As built
+
+```text
+Secure AI Gateway     Workspace  Secure Chat   Security  Policies
+─────────────────────────────────────────────────────────────────
+← All policies
+default                    [Test playground] [Create draft] [Publish…]
+
+Version 5 (draft)
+  Session TTL 1800s   Max entities 500   Rules 6   Providers mock
+
+Entity rules                                   Add entity [ IP_ADDRESS ▾ ]
+┌────────┬───────────────┬──────────┬──────────┬────────┬──────────────┐
+│Enabled │ Entity type   │Threshold │ Action   │Priority│ Recognizer   │
+├────────┼───────────────┼──────────┼──────────┼────────┼──────────────┤
+│  [x]   │ EMAIL_ADDRESS │  0.70    │ tokenize │   20   │ presidio…    │
+│  [x]   │ PHONE_NUMBER  │  0.40    │ tokenize │   20   │ presidio…    │
+│  [x]   │ US_SSN        │  0.50    │ block    │   30   │ presidio…    │
+└────────┴───────────────┴──────────┴──────────┴────────┴──────────────┘
+                                            Version history
+                                            ┌────────────────────────┐
+                                            │ Version 5      [Draft] │
+                                            │ Version 4     [Active] │
+                                            │ Version 3              │
+                                            └────────────────────────┘
+                                            [ Compare with v4 ]
+```
+
+Thresholds and actions are rendered from the loaded version, never from a
+constant in the frontend. Controls are disabled, not hidden, when no draft is
+open.
+
+## Publish Confirmation
+
+```text
+┌─ Publish policy version 5? ───────────────────────────┐
+│  · 3 entity rules changed                             │
+│  · 1 threshold changed                                │
+│  · 1 entity added                                     │
+│                                                       │
+│  ⚠ Weakens protection                                 │
+│    US_SSN — block → tokenize is less protective       │
+│                                                       │
+│              [ Cancel ]  [ Publish version 5 ]        │
+└───────────────────────────────────────────────────────┘
+```
+
+The warning does not block. The backend decides what is publishable, and an
+operator may have a good reason; being told before rather than after is the
+useful behaviour.
+
+## Policy Test Playground
+
+```text
+Synthetic input
+┌───────────────────────────────────────────────────────┐
+│ Jordan Rivera called from 415-555-0142 about the      │
+│ invoice sent to jordan.rivera@example.test.           │
+└───────────────────────────────────────────────────────┘
+[ Run test ]
+
+Result — v5 (draft)
+⦸ Provider would NOT be called
+
+Detected 3    PERSON 1    PHONE_NUMBER 1    EMAIL_ADDRESS 1
+
+┌───────────────┬─────────┬────────────┬──────────┐
+│ Entity type   │ Offsets │ Confidence │ Action   │
+├───────────────┼─────────┼────────────┼──────────┤
+│ PERSON        │  0–13   │    0.85    │ tokenize │
+│ PHONE_NUMBER  │ 26–38   │    0.40    │ tokenize │
+│ EMAIL_ADDRESS │ 63–89   │    0.95    │ tokenize │
+└───────────────┴─────────┴────────────┴──────────┘
+```
+
+**Offsets, not matched text.** The API returns no substrings, so the table shows
+positions. The browser already holds the text it submitted; the response adds
+nothing that could leak from a screenshot.
+
 ## Architecture Page
 
 ```text

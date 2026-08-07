@@ -37,21 +37,26 @@ Pin stable versions at implementation time.
 
 ## 4. Routes
 
+Built:
+
 ```text
-/login
 /chat
-/dashboard
-/sessions
-/sessions/[sessionId]
-/audit
-/audit/[requestId]
 /policies
-/policies/[policyId]
-/providers
-/health
-/architecture
-/about
+/policies/[policyName]
+/policies/[policyName]/test
 ```
+
+Specified, not built:
+
+```text
+/login  /dashboard  /sessions  /sessions/[sessionId]  /audit
+/audit/[requestId]  /providers  /health  /architecture  /about
+```
+
+The policy segment is `[policyName]`, not `[policyId]` as originally specified.
+Every policy version row has its own uuid, so no single id is stable across the
+history being managed; the name is what the repository, the unique constraint,
+and the API path all key on (ADR-0037).
 
 ## 5. Role Model
 
@@ -139,7 +144,47 @@ Raw prompt and response content are unavailable by design.
 
 ## 9. Policy Manager
 
-Support policy list, version history, entity actions, thresholds, provider/model allowlist, TTL, JSON preview, validation, and save-as-new-version. Weakening a control requires explicit confirmation.
+**Built (ADR-0037).**
+
+`/policies` lists each policy with its active version, a draft badge when one is
+open, entity and enabled counts, and the last published time. An empty list says
+the tenant has no policies rather than showing a blank page, and a refusal is
+shown with the gateway's own code — the two states are distinguishable, because
+"no policies" read as a fact about the tenant when it was really a permissions
+problem would be actively misleading.
+
+`/policies/[policyName]` shows metadata, the entity rule table, version history,
+and the draft controls. The rule table is editable only while a draft is open;
+otherwise its controls are disabled rather than hidden.
+
+Draft edits live in component state and are sent only on save. Nothing is
+written to `localStorage`, `sessionStorage`, `IndexedDB`, or a cookie — a rule's
+description is free text an operator may paste an identifier into, and ADR-0019
+keeps browser storage clear of anything a caller typed. Reloading therefore
+loses unsaved edits, which is the honest consequence of that choice.
+
+Publishing requires explicit confirmation. The dialog states what will change,
+warns about anything that weakens a control, and refuses when the backend has
+reported the draft invalid. It never publishes on mount or on Enter.
+
+Version history and the diff are view-only, and the diff is **fetched from the
+backend**. Reconstructing historical policy state in the browser would let the
+UI disagree with the database about what version 3 contained, and the whole
+value of an immutable version is that there is one answer.
+
+New entity rules are seeded from `GET /v1/detectors/entities`. The frontend has
+no entity catalog, no default thresholds, and no fallback policy: those belong
+to the detector, and a copy here would drift.
+
+`/policies/[policyName]/test` is the playground. It renders spans from offsets,
+because the API returns no matched text, and shows *provider would not be
+called* when any span resolves to `BLOCK`.
+
+### 9.1 Authorization in the UI
+
+The frontend hides controls a caller cannot use. That is a convenience and
+nothing more — `policies:read`, `policies:write`, and `policies:test` are
+enforced by the backend, and a hidden button is not a control.
 
 ## 10. Provider and Health Pages
 

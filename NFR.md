@@ -90,6 +90,15 @@ A requirement with no status label is a requirement nobody has checked.
 
 ---
 
+**The policy test playground accepts caller-supplied text and stores none of
+it.** It detects against a chosen policy version and returns offsets, entity
+types, confidences, and intended actions — never a matched substring, and never
+under privileged diagnostics either, because the endpoint exists to be run
+against realistic input. It does not tokenize, write a vault mapping, call a
+provider, persist the input, or log it, and its responses are `no-store`. Those
+are properties of code that is never called rather than of a flag, and they are
+pinned by `tests/unit/test_api_policies.py::TestPlayground` (ADR-0037).
+
 ## 3. Performance
 
 Targets and method: **[docs/performance.md](docs/performance.md)**. That
@@ -184,6 +193,10 @@ Runtime alerting: **[docs/observability.md](docs/observability.md)**.
 | M-4 | Lint and format are enforced, not advisory | **Enforced** |
 | M-5 | Test coverage stays at or above 80% | **Enforced** — currently ~95% |
 | M-6 | An adapter that talks to infrastructure is tested against that infrastructure, not only against a fake | **Enforced** — CI runs the S3 suite and fails if it would skip where credentials exist |
+| M-7 | Entity detection is configuration-driven: thresholds and actions are policy data, not code | **Enforced** — `GET /v1/detectors/entities` is derived from `app.detection.entities`; `tests/unit/test_policy_authoring.py::TestDetectorCatalog` |
+| M-8 | Adding an entity type requires no tokenizer or vault change | **Enforced** — a rule added from the catalog flows through the existing pipeline; `frontend/app/policies/[policyName]/page.test.tsx` seeds a new rule from the catalog |
+| M-9 | Published policy versions are immutable, and publishing creates a new version | **Enforced** — `tests/unit/test_policy_lifecycle.py::TestPublishing` (ADR-0037) |
+| M-10 | A request in flight keeps the `PolicySnapshot` it resolved | **Enforced** — `::TestSnapshotIsolation`; a snapshot is a frozen value, not a view onto a row |
 
 **M-6 is the one worth reading twice.** A fake is a dictionary: it cannot fail
 S3's 5 MiB part minimum, cannot sign a request, and never disagrees with the

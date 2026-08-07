@@ -550,3 +550,105 @@ between them:
 Defects 1, 2, 6 and 7 in §3 were all products of that parallelism — and all were
 caught in the integration pass, not by the agents. The method works, but the
 integration step is not optional.
+
+## §6 Policy management (ADR-0037) — complete
+
+Built on top of the existing policy engine. `PolicyDocument`, `PolicySnapshot`,
+resolution, and the request pipeline are unchanged: they were already
+configuration-driven, and this phase made them visible and editable rather than
+reworking them.
+
+**Verified 2026-08-07.** Backend: `ruff format`, `ruff check`, `mypy app`, 1737
+tests. Frontend: `lint`, `typecheck`, 158 tests, `build`.
+
+### What was built
+
+Twelve endpoints under `/v1/policies` and `/v1/detectors/entities`; migration
+`0004` adding `status`, `published_at`, and a one-draft-per-name partial unique
+index; a detector catalog derived from `app.detection.entities`; authoring-time
+validation and diff; audit events; three frontend routes with the draft and
+publish workflow, version history, diff, and the test playground.
+
+### Defects found building it
+
+**Defect 21 — `datetime` imported under `TYPE_CHECKING`.** Pydantic resolves
+response-model annotations at runtime when it builds the schema, so a name that
+exists only for the type checker is not there when it looks. The whole router
+was unreachable: `create_app().openapi()` raised, which meant *every* policy
+route 500ed. `ruff` and `mypy --strict` both accepted the file. Found by
+building the app and listing its routes, which is the only check that exercises
+schema construction.
+
+**Defect 22 — `vars()` on a `slots=True` dataclass.** `ValidationProblem` and
+`FieldChange` are slotted, so they have no `__dict__`; `POST .../validate` and
+`GET .../diff` returned `INTERNAL_ERROR`. Invisible to static checking, caught
+by the API tests.
+
+**Defect 23 — assumed HTTP status codes.** I wrote tests expecting 404 and 422.
+This gateway maps `POLICY_NOT_FOUND` to **409** and `INVALID_REQUEST` to **400**,
+matching how `/v1/chat` already reports them. The OpenAPI `responses` block had
+been written to the same wrong assumption, so the documentation would have been
+wrong in the same direction as the tests — a case where a test agreeing with the
+docs proves nothing, because one was copied from the other.
+
+**Defect 24 — a frontend test file that rendered once.** Eleven of twelve tests
+stubbed the gateway and queried a page that had never been mounted. Every
+failure read "unable to find element" rather than "you forgot to render".
+Rendering now lives inside the helper that stubs.
+
+**Defect 25 — the browser-persistence guard flagged its own documentation.**
+`lib/persistence.test.ts` matched the bare identifier `localStorage`, so a
+comment explaining that the playground never writes input to localStorage
+tripped the guard enforcing that guarantee. Narrowed to require a property
+access, with two new tests: one proving six real usage forms still trip it, one
+proving prose does not. Loosening a guard without proving it still catches
+things is how a guard quietly stops working.
+
+**Defect 26 — the playground refused every policy nobody was editing.**
+`POST /v1/policies/test` with no `version` looked only for an open draft and
+raised `POLICY_NOT_FOUND` when there was none, which is the normal state of a
+published policy. The page text promised the opposite ("detects against the open
+draft if there is one, otherwise the active version"), so the documentation and
+the code disagreed and the code was wrong.
+
+Found by running the playground against the local stack, not by a test: the 34
+API tests all supplied an explicit `version` or created a draft first, so none
+of them exercised the one path an operator takes first.
+
+Fixing it created a second-order problem worth recording. `_load_version` backs
+both the playground and draft validation, so adding the fallback silently made
+`POST .../validate` check the *active published version* when no draft existed —
+answering "valid" to an operator asking about a draft they had not created.
+Validation now looks the draft up directly.
+
+The two behaviours are deliberately different:
+
+| Endpoint | No explicit version |
+|---|---|
+| `POST /v1/policies/test` | open draft if present, otherwise the active published version |
+| `POST /v1/policies/{name}/validate` | open draft only; `POLICY_NOT_FOUND` if there is none |
+
+Both are pinned:
+`tests/unit/test_api_policies.py::TestPlayground::test_it_falls_back_to_the_active_version_when_no_draft_is_open`
+and
+`::TestValidationAndDiff::test_validation_requires_a_draft_rather_than_checking_the_live_version`.
+
+### Known limitations
+
+- **One draft per policy, with no owner.** A second operator cannot start
+  editing until the first publishes or discards, and there is no way to see who
+  holds it.
+- **No approval workflow, scheduling, or rollback automation.** Reverting means
+  opening a draft, editing it back, and publishing — which produces a new
+  version rather than pretending the change never happened.
+- **Unsaved draft edits are lost on reload**, because they live in component
+  state and browser storage is deliberately unused for anything a caller typed.
+- **Discarded drafts leave gaps in version numbers.** Preferable to reusing a
+  number that already appeared in a log line.
+- **`CUSTOM_RECOGNIZER_TYPES` is hand-maintained.** Introspecting the recognizer
+  registry would need a spaCy load on a cheap read, so a new custom recognizer
+  whose type is not added there is reported as built-in.
+- **The deployed demo API key predates these scopes** and will be refused by the
+  policy endpoints until it is re-issued.
+- **The JSON policy preview from architecture.md §22.10 was not built.** The
+  entity table and diff cover what it was for.

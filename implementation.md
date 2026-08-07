@@ -1359,6 +1359,92 @@ Record:
 
 ---
 
+## 23a. Policy Management (ADR-0037)
+
+Built after Phase 22, on top of the existing policy engine. The engine itself is
+unchanged: `PolicyDocument`, `PolicySnapshot`, resolution, and the request
+pipeline were already configuration-driven, and this phase made them visible and
+editable rather than reworking them.
+
+### Backend
+
+- [x] `Scope`: `policies:read`, `policies:write`, `policies:test`.
+- [x] `EntityRule` gains `enabled`, `priority`, `recognizer`, `description`, all
+      optional with defaults so every stored document parses unchanged.
+- [x] `PolicySnapshot.from_document` drops disabled rules, which routes their
+      type through `UNKNOWN_ENTITY_ACTION` (`TOKENIZE`) rather than releasing it.
+- [x] Migration `0004`: `policies.status`, `published_at`, and a partial unique
+      index giving one draft per `(tenant_id, name)`.
+- [x] Repository: `list_names`, `get_draft`, `next_version`, `create_draft`,
+      `update_draft`, `discard_draft`, `publish_draft`.
+- [x] `app/policy/catalog.py` — the detector catalog, derived from
+      `app.detection.entities`, exposing no patterns.
+- [x] `app/policy/authoring.py` — authoring validation, risk warnings, and diff,
+      kept separate from `app/policy/validation.py` so a future tightening of the
+      editor can never start rejecting a policy that is already live.
+- [x] Twelve routes under `/v1/policies` and `/v1/detectors/entities`.
+- [x] Audit events for draft created, updated, discarded, validated, published,
+      with the new keys added to `ALLOWED_EVENT_KEYS`.
+- [ ] Draft ownership. One draft per policy with no record of who holds it.
+- [ ] Rollback automation. Reverting means editing a draft back and publishing.
+
+### Frontend
+
+- [x] `lib/policies.ts` — typed client over the shared `request()` helper.
+- [x] `/policies`, `/policies/[policyName]`, `/policies/[policyName]/test`.
+- [x] `EntityTable`, `PublishDialog`, `VersionHistory`, `DiffView`, `AppNav`.
+- [x] `lib/testing.ts` — fixtures and a fetch router that throws on an unstubbed
+      request rather than returning an empty 200.
+- [ ] The JSON policy preview from §22.10 of the specification. The entity table
+      and the diff cover what it was for, and a raw document editor is a way to
+      write a policy the form would have refused.
+
+### Deviations worth knowing
+
+- **Routes key on the policy name, not an id.** Every version row has its own
+  uuid, so no single id is stable across the history being managed. The
+  frontend segment is `[policyName]`, not the `[policyId]` originally specified.
+- **`priority` is stored and displayed but not wired into overlap resolution.**
+  Severity-first ordering (ADR-0031) decides overlaps; letting a policy field
+  reorder it would change detection behaviour Phase 3 pinned with tests.
+- **Actions are the backend's lowercase values** (`tokenize`, `block`), not the
+  uppercase in the original brief, so a rule sent back is byte-identical to the
+  rule received.
+
+### Acceptance criteria
+
+- A published version cannot be edited through any route.
+- Publishing creates a new version and leaves every earlier one byte-identical
+  apart from `is_active`.
+- A request holding a `PolicySnapshot` is unaffected by a publish.
+- Two concurrent draft creations produce one draft and one refusal.
+- The detector catalog matches what the detector can emit, with no second list.
+- The playground never tokenizes, writes a vault mapping, calls a provider,
+  persists its input, or logs it, and returns no matched text.
+- A viewer scope can read and test; only a write scope can create or publish.
+- Version resolution differs by endpoint, deliberately:
+  - `POST /v1/policies/test` with no `version` uses the open draft if there is
+    one and the active published version otherwise.
+  - `POST /v1/policies/{name}/validate` uses the open draft only, and refuses
+    when there is none. It must never report on a published version, because an
+    operator asking about a draft would read that as an answer about their edit.
+
+**Verified 2026-08-07.** Backend: `ruff format`, `ruff check`, `mypy app`, 1737
+tests. Frontend: `lint`, `typecheck`, 158 tests, `build`.
+
+Three defects were found by tests rather than by review, and all three passed
+static checking: `datetime` imported under `TYPE_CHECKING` broke pydantic's
+runtime schema build and made every route unreachable; `vars()` on a
+`slots=True` dataclass returned 500 from validate and diff; and the assumed
+status codes were wrong — this gateway maps `POLICY_NOT_FOUND` to 409 and
+`INVALID_REQUEST` to 400, and the OpenAPI `responses` had been written to match
+the assumption.
+
+A fourth was found by running the stack rather than the suite: the playground
+resolved only a draft and refused every policy nobody was editing (defect 26).
+Every API test had supplied an explicit version or created a draft first, so the
+first path an operator takes was the one path untested.
+
 ## 24. Error Codes
 
 Implement at least:

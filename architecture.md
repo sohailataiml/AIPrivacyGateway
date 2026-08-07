@@ -1750,23 +1750,63 @@ Prompt and response content remain unavailable by architectural decision.
 
 ### 22.10 Policy Manager
 
-The Policy Manager provides:
+**Built (ADR-0037).** Three routes:
 
-- policy list with active version
-- policy detail
-- entity action table
-- confidence thresholds
-- provider/model allowlist
-- session TTL
-- maximum entities
-- output unknown-token behavior
-- JSON preview
-- validation results
-- save-as-new-version behavior
+| Route | Contents |
+|---|---|
+| `/policies` | Name, active version, draft badge, entity and enabled counts, last published |
+| `/policies/{name}` | Metadata, entity rule table, version history, diff, draft controls |
+| `/policies/{name}/test` | The policy test playground |
 
-Editing an active policy creates a new version. Existing accepted policy versions are immutable.
+The path segment is the policy **name**, not an id. Every version row carries
+its own uuid, so no single id is stable across the history an operator manages;
+`(tenant_id, name, version)` is the identity the schema already used.
 
-Dangerous actions such as switching `BLOCK` to `ALLOW` require explicit confirmation and a summary of the changed controls.
+The entity table shows `enabled`, entity type, threshold, action, priority,
+recognizer, and description. Editing is possible only when a draft is open;
+otherwise the controls render disabled rather than absent, so the workflow —
+edits happen on a draft — is visible rather than implied.
+
+**Editing an active policy is not possible.** There is no route that writes a
+published row. `POST /v1/policies/{name}/draft` copies the active version to a
+new draft; `PATCH` replaces the draft's document; `POST .../publish` promotes
+it. A published row's only mutable column is `is_active`.
+
+Weakening a control — a less protective action, a disabled rule, a threshold
+raised by 0.2 or more, a removed rule — raises a warning in the publish
+confirmation, alongside a summary of what will change. Warnings never block:
+the backend decides what is publishable, and an operator may have a good reason
+to allow an entity type.
+
+**Publishing does not affect requests already in flight.** A `PolicySnapshot` is
+a frozen value built at resolution time, not a view onto a row, so there is no
+path from a publish to a half-processed request.
+
+The JSON preview from the original specification was not built. The entity table
+and the version diff cover what it was for, and a raw document editor is a way
+to write a policy the form would have refused.
+
+### 22.10.1 Detector catalog
+
+`GET /v1/detectors/entities` reports every entity type the detector can emit,
+with its recognizer type, default threshold, severity, supported actions, and a
+description. It is derived from `app.detection.entities` rather than restated,
+so adding a type there surfaces it in the policy editor with no other change.
+The frontend keeps no catalog of its own. No recognizer patterns are exposed.
+
+### 22.10.2 Policy test playground
+
+`POST /v1/policies/test` resolves a named version — including an open draft —
+detects against it, and reports each span's entity type, offsets, confidence,
+and the action that policy would apply. It does not tokenize, write a vault
+mapping, call a provider, persist the submitted text, or log it.
+
+Results carry **offsets only**, never matched text, and that holds even where
+`/v1/detect` would return text under privileged diagnostics: this endpoint is
+designed to be run against realistic input, which is exactly when a response
+ends up in a screenshot. Responses are sent `Cache-Control: no-store`.
+
+A span resolving to `BLOCK` is reported as *provider would not be called*.
 
 ### 22.11 Provider and Health Pages
 
