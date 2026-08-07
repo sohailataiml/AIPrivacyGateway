@@ -4,6 +4,8 @@ import { useCallback, useState, useSyncExternalStore } from "react";
 
 import { Composer } from "@/components/chat/Composer";
 import { Conversation, type Turn } from "@/components/chat/Conversation";
+import type { DocumentStatus } from "@/components/documents/DocumentCard";
+import { HowItWorks } from "@/components/HowItWorks";
 import { Inspector } from "@/components/privacy/Inspector";
 import { apiKeyLabel, clearApiKey, getApiKey, hasApiKey, setApiKey, subscribe } from "@/lib/credential";
 import {
@@ -32,10 +34,19 @@ const DEFAULT_MODEL = "general-chat";
 interface Snapshot {
   summary: PrivacySummary | null;
   requestId: string | null;
+  /**
+   * No v1 response carries a policy version, so this is always null today.
+   * The field is kept because the inspector reports the absence rather than
+   * hiding it, and inventing a number would be the one thing item 14 of the
+   * brief forbids.
+   */
   policyVersion: number | null;
   attestation: string | null;
   elapsedMs: number | null;
   refusalCode: string | null;
+  refusalMessage: string | null;
+  provider: string | null;
+  document: DocumentStatus | null;
 }
 
 const EMPTY: Snapshot = {
@@ -45,6 +56,9 @@ const EMPTY: Snapshot = {
   attestation: null,
   elapsedMs: null,
   refusalCode: null,
+  refusalMessage: null,
+  provider: null,
+  document: null,
 };
 
 let turnCounter = 0;
@@ -59,6 +73,7 @@ export default function ChatWorkspace() {
   const [stage, setStage] = useState<InspectorStage>("idle");
   const [snapshot, setSnapshot] = useState<Snapshot>(EMPTY);
   const [showKeyForm, setShowKeyForm] = useState(false);
+  const [showHowItWorks, setShowHowItWorks] = useState(false);
   const usingOwnKey = useSyncExternalStore(subscribe, hasApiKey, () => false);
 
   const append = useCallback((turn: Omit<Turn, "id">) => {
@@ -80,6 +95,15 @@ export default function ChatWorkspace() {
         if (file) {
           setStage("uploading");
           const stored = await uploadDocument({ apiKey, file });
+          // Shown as soon as the upload returns, so the document card reflects
+          // real status during the longer processing call rather than after it.
+          const uploaded: DocumentStatus = {
+            name: stored.filename,
+            status: stored.status,
+            byteSize: stored.byte_size,
+            detected: null,
+          };
+          setSnapshot((current) => ({ ...current, document: uploaded }));
           setStage("in_flight");
           const answer = await processDocument({
             apiKey,
@@ -91,7 +115,12 @@ export default function ChatWorkspace() {
           });
           setSessionId(answer.session_id);
           setAttachment(null);
-          append({ author: "gateway", text: answer.message.content });
+          append({
+            author: "gateway",
+            text: answer.message.content,
+            provider: answer.provider,
+            restored: answer.privacy.restored,
+          });
           setSnapshot({
             summary: answer.privacy,
             requestId: answer.request_id,
@@ -99,6 +128,9 @@ export default function ChatWorkspace() {
             attestation: answer.outbound_attestation,
             elapsedMs: Math.round(performance.now() - started),
             refusalCode: null,
+            refusalMessage: null,
+            provider: answer.provider,
+            document: { ...uploaded, detected: answer.privacy.detected },
           });
         } else {
           setStage("in_flight");
@@ -110,7 +142,12 @@ export default function ChatWorkspace() {
             ...(sessionId ? { sessionId } : {}),
           });
           setSessionId(answer.session_id);
-          append({ author: "gateway", text: answer.message.content });
+          append({
+            author: "gateway",
+            text: answer.message.content,
+            provider: answer.provider,
+            restored: answer.privacy.restored,
+          });
           setSnapshot({
             summary: answer.privacy,
             requestId: answer.request_id,
@@ -118,6 +155,9 @@ export default function ChatWorkspace() {
             attestation: null,
             elapsedMs: Math.round(performance.now() - started),
             refusalCode: null,
+            refusalMessage: null,
+            provider: answer.provider,
+            document: null,
           });
         }
         setStage("completed");
@@ -130,12 +170,16 @@ export default function ChatWorkspace() {
             ? { code: error.code, message: error.message, requestId: error.requestId ?? null }
             : { code: "NETWORK", message: "The gateway could not be reached.", requestId: null };
         append({ author: "system", text: refusal.message });
-        setSnapshot({
+        setSnapshot((current) => ({
           ...EMPTY,
+          // A document that uploaded before the refusal really did upload, so
+          // its card survives; anything derived from the failed call does not.
+          document: current.document === null ? null : { ...current.document, detected: null },
           requestId: refusal.requestId,
           refusalCode: refusal.code,
+          refusalMessage: refusal.message,
           elapsedMs: Math.round(performance.now() - started),
-        });
+        }));
         setStage("refused");
       }
     },
@@ -150,6 +194,7 @@ export default function ChatWorkspace() {
         keyLabel={keyLabel}
         usingOwnKey={usingOwnKey}
         onToggleKeyForm={() => setShowKeyForm((open) => !open)}
+        onHowItWorks={() => setShowHowItWorks(true)}
         sessionId={sessionId}
         onClearSession={() => {
           // A new session is a new vault namespace: tokens from the old one
@@ -163,17 +208,22 @@ export default function ChatWorkspace() {
         onSignOut={clearApiKey}
       />
 
-      <div className="grid min-h-0 grid-cols-1 gap-4 p-4 lg:grid-cols-[1fr_22rem]">
-        {showKeyForm ? <ApiKeyGate onDone={() => setShowKeyForm(false)} /> : null}
-          <section className="panel flex min-h-0 flex-col">
-            <Conversation turns={turns} />
-            <Composer
-              disabled={busy}
-              attachment={attachment}
-              onAttach={setAttachment}
-              onSend={(text) => void send(text)}
-            />
-          </section>
+      {showKeyForm ? <ApiKeyGate onDone={() => setShowKeyForm(false)} /> : null}
+
+      {/* Single column until `lg`, where the inspector moves alongside. Both
+          children get `min-h-0` so each scrolls internally instead of pushing
+          the page into a horizontal or full-document scroll. */}
+      <div className="grid min-h-0 grid-cols-1 gap-4 overflow-y-auto p-4 lg:grid-cols-[minmax(0,1fr)_23rem] lg:overflow-hidden">
+        <section className="panel flex min-h-[24rem] min-w-0 flex-col lg:min-h-0">
+          <Conversation turns={turns} />
+          <Composer
+            disabled={busy}
+            attachment={attachment}
+            onAttach={setAttachment}
+            onSend={(text) => void send(text)}
+          />
+        </section>
+        <div className="min-h-0 min-w-0">
           <Inspector
             stage={stage}
             summary={snapshot.summary}
@@ -183,8 +233,14 @@ export default function ChatWorkspace() {
             attestation={snapshot.attestation}
             elapsedMs={snapshot.elapsedMs}
             refusalCode={snapshot.refusalCode}
+            refusalMessage={snapshot.refusalMessage}
+            provider={snapshot.provider}
+            document={snapshot.document}
           />
+        </div>
       </div>
+
+      <HowItWorks open={showHowItWorks} onClose={() => setShowHowItWorks(false)} />
     </main>
   );
 }
@@ -193,6 +249,7 @@ function Header({
   keyLabel,
   usingOwnKey,
   onToggleKeyForm,
+  onHowItWorks,
   sessionId,
   onClearSession,
   onSignOut,
@@ -200,22 +257,26 @@ function Header({
   keyLabel: string | null;
   usingOwnKey: boolean;
   onToggleKeyForm: () => void;
+  onHowItWorks: () => void;
   sessionId: string | null;
   onClearSession: () => void;
   onSignOut: () => void;
 }) {
   return (
-    <header className="flex items-center justify-between border-b border-edge px-5 py-3">
+    <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-edge px-4 py-3 sm:px-5">
       <div className="flex items-baseline gap-3">
         <h1 className="text-sm font-semibold tracking-wide">Secure AI Gateway</h1>
-        <span className="font-mono text-[11px] text-muted">
+        <span className="hidden font-mono text-[11px] text-muted sm:inline">
           {DEFAULT_PROVIDER} · {DEFAULT_MODEL}
         </span>
       </div>
-      <div className="flex items-center gap-2">
-        <span className="font-mono text-[11px] text-muted">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="hidden font-mono text-[11px] text-muted sm:inline">
           {usingOwnKey ? keyLabel : "demo credential"}
         </span>
+        <button type="button" className="btn-quiet" onClick={onHowItWorks}>
+          How it works
+        </button>
         <button type="button" className="btn-quiet" onClick={onClearSession} disabled={!sessionId}>
           Clear session
         </button>
