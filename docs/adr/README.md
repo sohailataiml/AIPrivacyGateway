@@ -67,7 +67,7 @@ When a requested implementation conflicts with an accepted ADR, stop and create 
 | [0024](0024-outbound-payload-attestation.md) | Record outbound payload attestation | Accepted |
 | [0025](0025-pseudonymization-risk.md) | Treat pseudonymization as re-identifiable | Accepted |
 | [0026](0026-co-reference-safe-default.md) | Preserve indirect co-references | Accepted |
-| [0027](0027-use-minio-locally.md) | MinIO as the local S3-compatible object store | Accepted |
+| [0027](0027-use-minio-locally.md) | MinIO as the local S3-compatible object store | Superseded by 0035 |
 
 These extend the rule above to five further areas: **document storage and
 extraction**, **vault interaction shape**, **session lifecycle**, **restoration
@@ -91,6 +91,8 @@ These extend the rule to three more areas: **where untrusted parsing runs**,
 | [0031](0031-merge-document-detections-on-global-offsets.md) | Merge document detections on global offsets, then apply policy | Accepted |
 | [0032](0032-readiness-is-a-type-not-a-status.md) | Readiness for protection is a type, not a document status | Accepted |
 | [0033](0033-protect-documents-with-the-prompt-tokenizer.md) | Protect documents with the prompt tokenizer, not a second one | Accepted |
+| [0034](0034-name-the-object-store-provider.md) | Name the object store provider instead of inferring it | Accepted |
+| [0035](0035-aws-s3-is-the-object-store.md) | AWS S3 is the object store; MinIO removed | Accepted |
 
 Three more areas: **how detections from overlapping segments become one set of
 spans**, **how a document says it is ready for the next stage**, and **where the
@@ -114,6 +116,8 @@ mechanism — and explicitly what the phase did *not* build:
 - [0032](0032-readiness-is-a-type-not-a-status.md) — the protection checkpoint
 - [0033](0033-protect-documents-with-the-prompt-tokenizer.md) — document protection
 - [0024](0024-outbound-payload-attestation.md) — outbound attestation, documents only
+- [0034](0034-name-the-object-store-provider.md) — object store provider selection
+- [0035](0035-aws-s3-is-the-object-store.md) — AWS S3 as the only object store
 
 Where an ADR has an As Built section, that section is the one to check code
 against. The Decision above it says what was agreed; the As Built section says

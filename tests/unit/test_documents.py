@@ -6,8 +6,8 @@ associated-data binding across tenant, user, document, and content type,
 tamper and truncation detection, opaque keys, and log hygiene.
 
 Everything runs against ``FakeDocumentStore`` and in-memory SQLite. Nothing here
-opens a socket; the store itself is exercised against real MinIO in
-``tests/integration/test_documents_minio.py``.
+opens a socket; the store itself is exercised against real AWS S3 in
+``tests/integration/test_documents_s3.py``.
 """
 
 from __future__ import annotations

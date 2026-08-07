@@ -39,11 +39,23 @@ REQUIRED: Final[tuple[str, ...]] = (
     "CORS_ALLOWED_ORIGINS",
     "DATABASE_URL",
     "REDIS_URL",
-    "OBJECT_STORE_ENDPOINT_URL",
     "OBJECT_STORE_BUCKET",
+)
+
+REQUIRED_FOR_COMPATIBLE: Final[tuple[str, ...]] = (
+    "OBJECT_STORE_ENDPOINT_URL",
     "OBJECT_STORE_ACCESS_KEY_ID",
     "OBJECT_STORE_SECRET_ACCESS_KEY",
 )
+"""Variables a non-AWS S3-compatible service cannot work without.
+
+These are provider-dependent, so they cannot live in ``REQUIRED``. An AWS
+deployment -- the default, and the one this project runs -- sets no custom
+endpoint, and may omit credentials entirely where a role is available, so
+demanding them would report a correct configuration as broken. ``Settings``
+performs the authoritative check either way; this list exists only so the
+common mistake is named before pydantic raises.
+"""
 
 
 def _write(line: str = "") -> None:
@@ -75,7 +87,13 @@ def main() -> int:
     values = _parse(path)
     values["APP_ENV"] = "production"
 
-    missing = [name for name in REQUIRED if not values.get(name)]
+    required = list(REQUIRED)
+    # Default to AWS, matching Settings, so a file that omits the provider is
+    # checked against the same shape the application will hold it to.
+    if values.get("OBJECT_STORE_PROVIDER", "aws").strip().lower() == "compatible":
+        required += REQUIRED_FOR_COMPATIBLE
+
+    missing = [name for name in required if not values.get(name)]
     if missing:
         _write("missing or empty:")
         for name in missing:
@@ -102,7 +120,7 @@ def main() -> int:
     _write()
     _write("Still not checked by this script, because it cannot be:")
     _write("  - that DATABASE_URL, REDIS_URL, and the object store are reachable")
-    _write("  - that the bucket exists (Render has no minio-init equivalent)")
+    _write("  - that the S3 bucket exists and the credentials can reach it")
     _write("  - that migrations have been applied (alembic upgrade head)")
     _write("  - that CORS_ALLOWED_ORIGINS is the workspace's actual URL")
     return 0

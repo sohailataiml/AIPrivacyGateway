@@ -1,17 +1,17 @@
-# Render blueprint: API, workspace, Postgres, Key Value, and self-hosted MinIO.
+# Render blueprint: API, workspace, Postgres, and Key Value.
 #
-# The object store is a **private service** with a persistent disk rather than a
-# managed bucket. It gets an internal hostname, is reachable only by the other
-# services in this blueprint, and is never published to the internet — which is
-# the same posture ADR-0027 gives it in compose, moved to a host.
+# Object storage is **AWS S3** (ADR-0035) and is therefore not in this file.
+# There is nothing to declare: no service, no disk, no internal hostname. The
+# API reaches a bucket you own, over the internet, with credentials Render
+# holds as secrets.
 #
-# Two consequences of that choice, stated because they are easy to discover late:
+# Two consequences, stated because they are easy to discover late:
 #
-#   * A persistent disk pins the object store to **one instance**. It cannot be
-#     scaled horizontally, and a restart is a brief outage for document reads.
-#     Acceptable for a demo; it is not a highly available store.
-#   * Disks are a paid feature on Render. Verify your plan includes one before
-#     relying on this file.
+#   * Render cannot assume an AWS IAM role, so this deployment uses a static
+#     access key pair. Scope it to one bucket and rotate it on a schedule --
+#     the role-based posture the application supports is not available here.
+#   * The bucket must already exist, with public access blocked. Nothing in
+#     this blueprint creates it, and the first upload is where you find out.
 #
 # Every secret is `sync: false`, meaning Render prompts for it and it never
 # appears in this repository. Generate them with:
@@ -28,38 +28,6 @@
 # validation locally turns that into a message on your laptop.
 
 services:
-  # ---------------------------------------------------------------------------
-  # Object store — private, disk-backed, never exposed
-  # ---------------------------------------------------------------------------
-  - type: pserv
-    name: sgw-object-store
-    runtime: image
-    plan: starter
-    image:
-      url: docker.io/minio/minio:latest
-    # Two things here are not obvious and were both found by deploying:
-    #
-    #   * Render routes a private service on **port 10000**, not the image's
-    #     default. MinIO must be told to listen there or the gateway's S3 calls
-    #     reach a closed port -- which surfaces as `object_store: down` at
-    #     readiness with nothing wrong in either service's own log.
-    #   * MinIO treats a top-level directory under its data dir as a bucket, so
-    #     creating it before startup is how the bucket comes to exist. Compose
-    #     uses a `minio-init` service for this; Render has no equivalent hook,
-    #     and without it the first upload fails.
-    #
-    # The console is deliberately not exposed: this service has no ingress.
-    dockerCommand: sh -c "mkdir -p /data/sgw-documents && exec minio server /data --address :10000"
-    disk:
-      name: sgw-objects
-      mountPath: /data
-      sizeGB: 10
-    envVars:
-      - key: MINIO_ROOT_USER
-        sync: false
-      - key: MINIO_ROOT_PASSWORD
-        sync: false
-
   # ---------------------------------------------------------------------------
   # Gateway API
   # ---------------------------------------------------------------------------
@@ -92,18 +60,18 @@ services:
           name: sgw-keyvalue
           property: connectionString
 
-      # Reached over Render's private network. `http` is correct here: the hop
-      # does not leave the private network, and the objects on the wire are
-      # already sealed with per-document AES-256-GCM (ADR-0020).
-      - key: OBJECT_STORE_ENDPOINT_URL
-        fromService:
-          type: pserv
-          name: sgw-object-store
-          property: hostport
+      # AWS S3. No endpoint: S3 resolves its own, and production refuses a
+      # provider and an endpoint that disagree (ADR-0034) because that
+      # misconfiguration is otherwise silent.
+      - key: OBJECT_STORE_PROVIDER
+        value: aws
       - key: OBJECT_STORE_BUCKET
-        value: sgw-documents
-      - key: OBJECT_STORE_USE_PATH_STYLE
-        value: "true"
+        sync: false
+      - key: OBJECT_STORE_REGION
+        sync: false
+      # Static credentials, because Render cannot assume an IAM role. The
+      # application prefers a role where one is available; this is the fallback,
+      # not the recommended posture.
       - key: OBJECT_STORE_ACCESS_KEY_ID
         sync: false
       - key: OBJECT_STORE_SECRET_ACCESS_KEY

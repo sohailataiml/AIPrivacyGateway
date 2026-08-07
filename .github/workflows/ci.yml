@@ -70,15 +70,19 @@ jobs:
       DATABASE_URL: postgresql+asyncpg://gateway:gateway@localhost:5432/gateway_test
       REDIS_URL: redis://localhost:6379/0
       TEST_REDIS_URL: redis://localhost:6379/15
-      # The object store suite skips without this, and a skipped storage test
-      # verifies the adapter against nothing.
-      TEST_OBJECT_STORE_ENDPOINT: http://localhost:9000
-      TEST_OBJECT_STORE_ACCESS_KEY_ID: sgw-ci-access-key
-      TEST_OBJECT_STORE_SECRET_ACCESS_KEY: sgw-ci-secret-key-not-for-production
-      TEST_OBJECT_STORE_BUCKET: sgw-documents
-      # Turns "MinIO did not start" into a failing build rather than a green
-      # one with the whole object store suite silently skipped.
-      REQUIRE_OBJECT_STORE_TESTS: "1"
+      # Object storage is AWS S3 (ADR-0035), so this suite needs a real
+      # disposable bucket rather than a container. It is gated on repository
+      # secrets: a fork, or a clone without them, skips the suite instead of
+      # failing on credentials it was never going to have.
+      TEST_OBJECT_STORE_BUCKET: ${{ secrets.TEST_OBJECT_STORE_BUCKET }}
+      TEST_OBJECT_STORE_REGION: ${{ secrets.TEST_OBJECT_STORE_REGION }}
+      TEST_OBJECT_STORE_ACCESS_KEY_ID: ${{ secrets.TEST_OBJECT_STORE_ACCESS_KEY_ID }}
+      TEST_OBJECT_STORE_SECRET_ACCESS_KEY: ${{ secrets.TEST_OBJECT_STORE_SECRET_ACCESS_KEY }}
+      # Set only when the bucket secret exists. Where it does, a dropped
+      # variable or an expired key becomes a red build rather than a green one
+      # with the whole object store suite silently skipped; where it does not,
+      # the suite is allowed to skip honestly.
+      REQUIRE_OBJECT_STORE_TESTS: ${{ secrets.TEST_OBJECT_STORE_BUCKET != '' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -86,25 +90,6 @@ jobs:
           enable-cache: true
       - run: uv sync --all-extras
       - run: uv run python -m spacy download en_core_web_lg
-
-      # Not a `services:` entry: MinIO needs a command argument (`server /data`)
-      # and GitHub's service containers cannot supply one.
-      - name: Start MinIO and create the bucket
-        run: |
-          docker run -d --name minio -p 9000:9000 \
-            -e MINIO_ROOT_USER="$TEST_OBJECT_STORE_ACCESS_KEY_ID" \
-            -e MINIO_ROOT_PASSWORD="$TEST_OBJECT_STORE_SECRET_ACCESS_KEY" \
-            minio/minio:latest server /data
-          for _ in $(seq 1 60); do
-            curl -sf http://localhost:9000/minio/health/live && break
-            sleep 1
-          done
-          curl -sf http://localhost:9000/minio/health/live
-          docker run --rm --network host --entrypoint sh minio/mc:latest -c "
-            mc alias set ci http://localhost:9000 \
-              '$TEST_OBJECT_STORE_ACCESS_KEY_ID' '$TEST_OBJECT_STORE_SECRET_ACCESS_KEY' &&
-            mc mb --ignore-existing ci/$TEST_OBJECT_STORE_BUCKET &&
-            mc anonymous set none ci/$TEST_OBJECT_STORE_BUCKET"
 
       - run: uv run alembic upgrade head
       - run: uv run pytest tests/integration -m integration

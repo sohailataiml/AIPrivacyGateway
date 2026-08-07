@@ -753,14 +753,15 @@ metadata in PostgreSQL and document bytes nowhere else.
 | `app/documents/crypto.py` | The wire format and the chunked cipher |
 | `app/documents/models.py` | Domain types and the accepted-type table |
 | `app/documents/protocol.py` | The `DocumentStore` seam |
-| `app/documents/storage/s3.py` | aioboto3 adapter — MinIO, S3, or any compatible endpoint |
+| `app/documents/storage/s3.py` | aioboto3 adapter — AWS S3, or any compatible endpoint |
 | `app/documents/storage/fakes.py` | In-memory store for tests in other packages |
 | `app/documents/repository.py` | Tenant- and user-scoped metadata access |
 | `app/documents/service.py` | Order of operations, and the consistency guarantee |
 | `app/api/v1/documents.py` | Four routes under `/v1` |
 
-Nothing above the `DocumentStore` protocol knows whether it is talking to MinIO
-or AWS. Nothing below it knows what a document is.
+Nothing above the `DocumentStore` protocol knows which S3 endpoint it is
+talking to — the adapter has no provider flag to branch on, only resolved
+values (ADR-0034). Nothing below it knows what a document is.
 
 ### Encryption
 

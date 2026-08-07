@@ -1,26 +1,22 @@
-# Development override: publishes PostgreSQL, Redis, and the MinIO API to the
-# host so the gateway -- or the integration suite -- can be run outside a
-# container against them.
+# Development override: publishes PostgreSQL and Redis to the host so the
+# gateway -- or the integration suite -- can be run outside a container against
+# them.
 #
 #   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d \
-#       postgres redis minio minio-init
+#       postgres redis
 #
 # The base compose file deliberately does not publish these ports -- only the
 # gateway needs to reach them, and a database listening on a developer's network
 # interface is a bad default. Use this file only for local development, and
 # never as part of a deployed configuration.
 #
-# All are bound to 127.0.0.1 explicitly, so they are reachable from this
+# Both are bound to 127.0.0.1 explicitly, so they are reachable from this
 # machine and from nowhere else.
 #
-# The MinIO API port is here rather than in the base file because the object
-# store integration suite runs on the host and talks to it directly:
-#
-#   TEST_OBJECT_STORE_ENDPOINT=http://localhost:9000 \
-#       pytest tests/integration/test_documents_minio.py -m integration
-#
-# Without a published API port those tests skip, and a skipped storage test
-# verifies the adapter against nothing.
+# Object storage is not here. It is AWS S3 (ADR-0035), which is reached over the
+# network and has no port to publish; the storage integration suite in
+# tests/integration/test_documents_s3.py talks to a real bucket and is gated on
+# TEST_OBJECT_STORE_BUCKET rather than on a local endpoint.
 
 services:
   postgres:
@@ -30,7 +26,3 @@ services:
   redis:
     ports:
       - "127.0.0.1:6379:6379"
-
-  minio:
-    ports:
-      - "127.0.0.1:9000:9000"

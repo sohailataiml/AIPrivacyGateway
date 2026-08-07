@@ -75,7 +75,7 @@ tenant, and it is bulk Restricted content that has never been through detection.
 | Filename spoofing | Bidirectional control characters rejected, and the name is rejected rather than repaired |
 | Filename disclosure | Stored encrypted, returned only to its owner, absent from the status route, and swept for by the canary suite across logs, SQL, metrics, and responses |
 | Resource exhaustion | Declared length checked up front and the real byte count checked as it streams; memory bounded by chunk size rather than document size |
-| Orphaned multipart uploads | Explicit abort on any failure including cancellation, verified against a live MinIO; a bucket lifecycle rule as backstop |
+| Orphaned multipart uploads | Explicit abort on any failure including cancellation, verified against live S3; a bucket lifecycle rule as backstop |
 | Torn state | Row before object, `stored` set last, object deleted before row |
 
 ### What this does not defend against

@@ -24,9 +24,8 @@ touches no document table.
 
 ## Storage — built
 
-S3-compatible object storage, MinIO in the Compose and interview environment
-(ADR-0027), reached through the S3 API only so the local store and a deployed
-one differ by configuration rather than by code.
+AWS S3 (ADR-0035), reached through the S3 API only. One adapter serves any
+S3-compatible endpoint; which one it talks to is configuration, never code.
 PostgreSQL stores metadata only — identifiers, content type, sizes, checksums,
 timestamps, status — and never document bytes (ADR-0020).
 
@@ -384,17 +383,21 @@ until a lifecycle rule finds them.
 
 ## Verification
 
-Storage is verified against real MinIO, not only against the in-memory fake. The
-fake cannot fail S3's 5 MiB part minimum, cannot sign a request, and never
+Storage is verified against real AWS S3, not only against the in-memory fake.
+The fake cannot fail S3's 5 MiB part minimum, cannot sign a request, and never
 disagrees with the gateway about what an object key means; the integration suite
 asks the server directly whether an upload is still open, and reads object
-metadata with an independent client. CI sets `REQUIRE_OBJECT_STORE_TESTS=1` so a
-MinIO that failed to start is a red build rather than a green one full of skips.
+metadata with an independent client. Against real S3 it also covers what no
+local stand-in could: IAM evaluation, virtual-host addressing, and whether the
+bucket actually blocks public reads.
+
+The suite needs a **disposable** bucket -- it writes and deletes objects. CI
+sets `REQUIRE_OBJECT_STORE_TESTS` from whether the bucket secret exists, so the
+suite is a red build where it is meant to run and skips honestly where it
+cannot.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d minio minio-init
-TEST_OBJECT_STORE_ENDPOINT=http://localhost:9000 \
-    pytest tests/integration/test_documents_minio.py -m integration
+TEST_OBJECT_STORE_BUCKET=my-disposable-bucket TEST_OBJECT_STORE_REGION=us-east-1 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=...     pytest tests/integration/test_documents_s3.py -m integration
 ```
 
 ## What Phase 5 does not do
@@ -426,7 +429,7 @@ Two limits worth stating rather than discovering:
 - ADR-0020 — encrypted object storage
 - ADR-0021 — user-scoped document keys
 - ADR-0022 — batch vault operations
-- ADR-0027 — MinIO as the local object store
+- ADR-0035 — AWS S3 as the object store (supersedes ADR-0027)
 - ADR-0028 — spawned process isolation for extraction
 - ADR-0029 — page-range document offsets
 - ADR-0030 — do not persist extracted plaintext

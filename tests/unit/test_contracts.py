@@ -60,6 +60,12 @@ def production_env(**overrides: str) -> dict[str, str]:
         "DOCUMENT_ACTIVE_KEY_ID": "prod1",
         "DOCUMENT_KEY_PROD1": REAL_DOCUMENT_KEY,
         "OBJECT_STORE_BUCKET": "sgw-documents",
+        # AWS S3 is the default and needs no endpoint; it resolves its own,
+        # and production refuses a provider and an endpoint that disagree.
+        # Credentials are optional on AWS but set here so this fixture also
+        # covers the static-credential path a Render deployment uses.
+        # See tests/unit/test_object_store_config.
+        "OBJECT_STORE_PROVIDER": "aws",
         "OBJECT_STORE_ACCESS_KEY_ID": STRONG_OBJECT_STORE_KEY_ID,
         "OBJECT_STORE_SECRET_ACCESS_KEY": STRONG_OBJECT_STORE_SECRET,
     }

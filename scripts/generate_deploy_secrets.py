@@ -1,6 +1,6 @@
 """Mint the secrets a production deployment needs, once, to stdout.
 
-Four kinds of secret, and they are not interchangeable:
+Three kinds of secret, and they are not interchangeable:
 
 * **Vault keys** and **document keys** are AES-256-GCM keys. Exactly 32 bytes,
   base64-encoded. The gateway refuses anything else at startup -- a 34-byte key
@@ -10,7 +10,11 @@ Four kinds of secret, and they are not interchangeable:
 * **The API key pepper** and **audit HMAC key** are secrets for keyed hashing.
   They have a minimum length rather than a fixed one.
 * **The metrics token** is a bearer credential for the scrape endpoint.
-* **MinIO's root credentials** protect the object store itself.
+
+Object store credentials are **not** minted here. Storage is AWS S3 (ADR-0035),
+so its credentials are issued by IAM, not generated locally -- a key pair this
+script invented would authenticate against nothing. What the deployment needs
+from AWS is listed at the end of the output.
 
 They are printed **once** and stored nowhere. Paste them into Render's dashboard
 and close the terminal. Piping this to a file defeats the point; if you lose
@@ -36,8 +40,6 @@ AES_KEY_BYTES: Final = 32
 
 PEPPER_CHARS: Final = 48
 TOKEN_CHARS: Final = 48
-MINIO_USER_CHARS: Final = 20
-MINIO_PASSWORD_CHARS: Final = 40
 
 
 def _aes_key() -> str:
@@ -70,28 +72,23 @@ def main() -> None:
     _write(f"METRICS_TOKEN={secrets.token_urlsafe(TOKEN_CHARS)}")
     _write()
 
-    object_user = f"sgw-{secrets.token_hex(MINIO_USER_CHARS // 2)}"
-    object_password = secrets.token_urlsafe(MINIO_PASSWORD_CHARS)
-    _write("## sgw-api  (must match sgw-object-store below)")
-    _write(f"OBJECT_STORE_ACCESS_KEY_ID={object_user}")
-    _write(f"OBJECT_STORE_SECRET_ACCESS_KEY={object_password}")
-    _write()
-
-    _write("## sgw-object-store")
-    _write(f"MINIO_ROOT_USER={object_user}")
-    _write(f"MINIO_ROOT_PASSWORD={object_password}")
-    _write()
-
     _write("## Set by hand, once the services have URLs")
-    _write("# CORS_ALLOWED_ORIGINS   on sgw-api        = https://<workspace>.onrender.com")
-    _write("# NEXT_PUBLIC_GATEWAY_ORIGIN on sgw-workspace = https://<api>.onrender.com")
+    _write("# CORS_ALLOWED_ORIGINS on sgw-api = https://<workspace>.onrender.com")
+    _write("# GATEWAY_ORIGIN       on sgw-workspace = https://<api>.onrender.com")
+    _write("# GATEWAY_DEMO_API_KEY on sgw-workspace = a seeded key, server-side only")
     _write()
-    _write("# The bucket is NOT created for you. After the first deploy:")
-    _write(
-        "#   mc alias set r http://<object-store-host>:9000 $MINIO_ROOT_USER $MINIO_ROOT_PASSWORD"
-    )
-    _write("#   mc mb r/sgw-documents")
-    _write("# Compose does this with a minio-init service; Render has no equivalent hook.")
+
+    _write("## From AWS, not from this script")
+    _write("# Storage is S3, so IAM issues these -- a generated pair signs nothing.")
+    _write("#   OBJECT_STORE_BUCKET             an existing bucket, public access blocked")
+    _write("#   OBJECT_STORE_REGION             the bucket's region")
+    _write("#   OBJECT_STORE_ACCESS_KEY_ID      from an IAM user scoped to that bucket")
+    _write("#   OBJECT_STORE_SECRET_ACCESS_KEY  its secret, shown once by AWS")
+    _write("#")
+    _write("# Render cannot assume an IAM role, which is why this is a static key")
+    _write("# pair. Grant it s3:GetObject, s3:PutObject, s3:DeleteObject,")
+    _write("# s3:AbortMultipartUpload, and s3:ListBucket on that bucket alone, and")
+    _write("# rotate it on a schedule.")
 
 
 if __name__ == "__main__":

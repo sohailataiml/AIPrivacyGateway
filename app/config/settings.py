@@ -46,6 +46,28 @@ class AppEnv(StrEnum):
     PRODUCTION = "production"
 
 
+class ObjectStoreProvider(StrEnum):
+    """Which S3-compatible service the document store is pointed at.
+
+    This selects *configuration*, never an implementation. There is one
+    ``S3CompatibleDocumentStore`` and every provider speaks the same API to it;
+    what differs is endpoint addressing, whether a custom endpoint is expected,
+    and where credentials come from. Encoding that difference as an enum rather
+    than leaving it implicit in three independent variables means a deployment
+    states its intent once and gets checked against it, instead of silently
+    talking to the wrong service because ``OBJECT_STORE_ENDPOINT_URL`` was left
+    unset.
+
+    ``AWS`` is the default and the only backend the project runs (ADR-0035).
+    ``COMPATIBLE`` remains because the adapter is genuinely S3-compatible and
+    the endpoint-plus-static-credentials shape is what every such service needs;
+    it is the escape hatch for pointing at one, not a supported deployment.
+    """
+
+    AWS = "aws"
+    COMPATIBLE = "compatible"
+
+
 class Settings(BaseSettings):
     """All runtime configuration. Constructed once during application startup."""
 
@@ -90,7 +112,7 @@ class Settings(BaseSettings):
     ring should not be a compromise of the other.
     """
 
-    # -- Object storage (ADR-0020, ADR-0027) ------------------------------
+    # -- Object storage (ADR-0020, ADR-0034, ADR-0035) --------------------
     documents_enabled: bool = True
     """Whether the document routes are mounted and object storage is opened.
 
@@ -99,16 +121,35 @@ class Settings(BaseSettings):
     demanding document keys it has no documents to protect.
     """
 
+    object_store_provider: ObjectStoreProvider = ObjectStoreProvider.AWS
+    """Which S3-compatible service to talk to. AWS S3 unless stated otherwise."""
+
     object_store_endpoint_url: str | None = None
-    """MinIO or another S3-compatible endpoint. ``None`` means real AWS S3."""
+    """A custom endpoint. Must be ``None`` for AWS S3, which resolves its own."""
 
     object_store_region: str = "us-east-1"
     object_store_bucket: str = "sgw-documents"
     object_store_access_key_id: SecretStr | None = None
     object_store_secret_access_key: SecretStr | None = None
+    """Static credentials.
 
-    object_store_use_path_style: bool = True
-    """MinIO addresses buckets by path; AWS S3 prefers virtual-host style."""
+    Optional on AWS, where leaving both unset selects botocore's default
+    credential chain -- the instance or task role. That is the better posture
+    there: a role issues short-lived credentials that rotate themselves, so
+    demanding a long-lived key pair would force a deployment into weaker
+    handling of a secret it never needed to hold. Required for any other
+    S3-compatible service, which has no ambient identity to fall back on.
+    """
+
+    object_store_use_path_style: bool | None = None
+    """Bucket addressing. ``None`` follows the provider's own convention.
+
+    AWS S3 wants virtual-host style; other S3-compatible services generally
+    address buckets by path. Left unset this is derived from
+    ``object_store_provider``, so the common case needs no variable at all. Set
+    it explicitly only to override -- an S3-compatible service behind a VPC
+    endpoint can need path style while still being AWS.
+    """
 
     object_store_connect_timeout_seconds: float = Field(default=5.0, gt=0)
     object_store_read_timeout_seconds: float = Field(default=30.0, gt=0)
@@ -261,6 +302,24 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
+    @field_validator("object_store_access_key_id", "object_store_secret_access_key", mode="before")
+    @classmethod
+    def _blank_credential_is_absent(cls, value: object) -> object:
+        """Treat an empty environment variable as unset, not as an empty secret.
+
+        ``OBJECT_STORE_ACCESS_KEY_ID=`` and an absent variable mean the same
+        thing to an operator, and every templating layer that renders an unset
+        value -- Compose's ``${VAR:-}``, Helm, Terraform -- produces the empty
+        string. Without this they mean opposite things to botocore: absent
+        selects the default credential chain, while empty is a credential, so
+        requests get signed with nothing and fail authentication instead of
+        falling back to the instance role. The provider validation above would
+        also read it as "credentials supplied" and stop asking for real ones.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     @model_validator(mode="after")
     def _load_vault_key_ring(self) -> Self:
         """Read ``VAULT_KEY_<ID>`` variables into the key ring."""
@@ -366,12 +425,9 @@ class Settings(BaseSettings):
 
         if not self.object_store_bucket:
             problems.append("OBJECT_STORE_BUCKET must be set when DOCUMENTS_ENABLED is true")
-        if self.object_store_access_key_id is None:
-            problems.append("OBJECT_STORE_ACCESS_KEY_ID must be set when DOCUMENTS_ENABLED is true")
-        if self.object_store_secret_access_key is None:
-            problems.append(
-                "OBJECT_STORE_SECRET_ACCESS_KEY must be set when DOCUMENTS_ENABLED is true"
-            )
+
+        problems.extend(self._object_store_provider_problems())
+
         for name, secret in (
             ("OBJECT_STORE_ACCESS_KEY_ID", self.object_store_access_key_id),
             ("OBJECT_STORE_SECRET_ACCESS_KEY", self.object_store_secret_access_key),
@@ -379,6 +435,56 @@ class Settings(BaseSettings):
             if secret is not None and secret.get_secret_value() in DEVELOPMENT_PLACEHOLDERS:
                 problems.append(f"{name} is still a development placeholder")
 
+        return problems
+
+    def _object_store_provider_problems(self) -> list[str]:
+        """Check endpoint and credentials against the declared provider.
+
+        Each rule exists because the failure it prevents is quiet. A deployment
+        pointed at a compatible service that forgets its endpoint does not
+        error -- botocore resolves real AWS S3 and the gateway tries to store
+        documents in an account nobody intended, with credentials meant for
+        somewhere else. An AWS deployment that keeps a stale endpoint from an
+        old ``.env`` sends production traffic to a host that is not there.
+        Neither is visible in a health check that only proves the client was
+        constructible.
+        """
+        has_id = self.object_store_access_key_id is not None
+        has_secret = self.object_store_secret_access_key is not None
+
+        if self.object_store_provider is ObjectStoreProvider.COMPATIBLE:
+            problems = []
+            if not self.object_store_endpoint_url:
+                problems.append(
+                    "OBJECT_STORE_ENDPOINT_URL must be set when "
+                    "OBJECT_STORE_PROVIDER is 'compatible'"
+                )
+            if not has_id:
+                problems.append(
+                    "OBJECT_STORE_ACCESS_KEY_ID must be set when "
+                    "OBJECT_STORE_PROVIDER is 'compatible'"
+                )
+            if not has_secret:
+                problems.append(
+                    "OBJECT_STORE_SECRET_ACCESS_KEY must be set when "
+                    "OBJECT_STORE_PROVIDER is 'compatible'"
+                )
+            return problems
+
+        problems = []
+        if self.object_store_endpoint_url:
+            problems.append(
+                "OBJECT_STORE_ENDPOINT_URL must not be set when OBJECT_STORE_PROVIDER is 'aws'"
+            )
+        # Both or neither. One alone is not a working credential, and botocore
+        # would fall through to the default chain and use an identity the
+        # operator did not think they were using.
+        if has_id != has_secret:
+            problems.append(
+                "OBJECT_STORE_ACCESS_KEY_ID and OBJECT_STORE_SECRET_ACCESS_KEY "
+                "must be set together, or both left unset to use the AWS "
+                "default credential chain"
+            )
         return problems
 
     @staticmethod
@@ -400,6 +506,19 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.app_env is AppEnv.PRODUCTION
+
+    @property
+    def object_store_uses_path_style(self) -> bool:
+        """Resolve bucket addressing, honouring an explicit override.
+
+        The provider decides only when nothing was stated. Keeping the override
+        meaningful matters: an S3-compatible service behind a VPC endpoint can
+        need path style while still being AWS, and a provider enum that silently
+        overruled the operator would make that deployment unreachable.
+        """
+        if self.object_store_use_path_style is not None:
+            return self.object_store_use_path_style
+        return self.object_store_provider is ObjectStoreProvider.COMPATIBLE
 
     @property
     def diagnostics_allowed(self) -> bool:

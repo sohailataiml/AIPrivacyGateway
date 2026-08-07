@@ -1,9 +1,19 @@
 """S3-compatible object store, backed by aioboto3.
 
-Targets MinIO locally (ADR-0027) and AWS S3 or any compatible service in a
-deployment. The difference is configuration -- endpoint, credentials, addressing
-style -- and nothing in this module knows which one it is talking to. Nothing
-here is MinIO-specific: no admin API, no console, no vendor extension.
+Targets AWS S3 (ADR-0035), and any other S3-compatible endpoint, through one
+implementation. The difference between them is entirely configuration --
+endpoint, credentials, addressing style -- resolved in ``Settings`` and handed
+here already reduced to plain values. Nothing in this module knows or can ask
+which service it is talking to, and there is deliberately no provider flag to
+branch on: the moment one exists, provider-specific behaviour starts
+accumulating behind it and the two paths drift.
+
+That holds because the gateway needs no vendor extension to do its job. It
+encrypts documents itself before they arrive here (chunked AES-256-GCM, per
+document keys), so it does not reach for SSE-KMS on AWS; it addresses objects
+by key, so it needs no admin API, no console, no bucket policy language. What
+is left is ``PutObject``, multipart, ``GetObject``, ``DeleteObject``, and
+``HeadBucket`` -- the intersection both services implement identically.
 
 **Why multipart.** S3 requires the full object length up front for a simple
 ``PutObject``, which a streaming upload does not know. Multipart is how a stream
@@ -84,7 +94,7 @@ class S3CompatibleDocumentStore:
             "aws_access_key_id": access_key_id,
             "aws_secret_access_key": secret_access_key,
             "config": Config(
-                # MinIO addresses buckets by path; S3 prefers virtual-host.
+                # AWS S3 wants virtual-host; other services address by path.
                 s3={"addressing_style": "path" if use_path_style else "virtual"},
                 connect_timeout=connect_timeout_seconds,
                 read_timeout=read_timeout_seconds,
@@ -104,7 +114,12 @@ class S3CompatibleDocumentStore:
             access_key_id=access_key.get_secret_value() if access_key else None,
             secret_access_key=secret_key.get_secret_value() if secret_key else None,
             part_bytes=max(settings.document_chunk_bytes, MIN_PART_BYTES),
-            use_path_style=settings.object_store_use_path_style,
+            # Resolved, not raw: the provider supplies the convention when the
+            # deployment did not state one. This is the only place the provider
+            # reaches the store, and it arrives already reduced to a boolean --
+            # the store stays a single implementation that cannot branch on
+            # which vendor it is talking to.
+            use_path_style=settings.object_store_uses_path_style,
             connect_timeout_seconds=settings.object_store_connect_timeout_seconds,
             read_timeout_seconds=settings.object_store_read_timeout_seconds,
         )

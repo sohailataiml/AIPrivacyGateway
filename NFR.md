@@ -32,7 +32,7 @@ A requirement with no status label is a requirement nobody has checked.
 | S-4 | Absence and denial are indistinguishable to a caller | **Enforced** | `tests/security/test_document_authorization.py` |
 | S-5 | No secret or key appears in a log, metric label, audit record, or error message | **Enforced** | `tests/privacy/test_document_canaries.py` |
 | S-6 | All input is validated at the boundary, and rejected rather than repaired | **Enforced** | `tests/unit/test_document_validation_matrix.py` |
-| S-7 | Object storage is private; possessing an object key grants nothing | **Enforced** | `deploy/compose/minio-init.sh`, MinIO integration suite |
+| S-7 | Object storage is private; possessing an object key grants nothing | **Enforced** | S3 integration suite — an unsigned read of a stored object is refused |
 | S-8 | Production startup refuses placeholder or missing secrets | **Enforced** | `tests/unit/test_contracts.py` |
 | S-9 | Keys are rotatable without re-encrypting existing data | **Implemented** | key id travels with each record |
 | S-10 | Key rotation is driven by tooling and monitored | **Specified** | no rotation tooling exists |
@@ -102,7 +102,7 @@ Document-storage requirements that are structural rather than numeric:
 |---|---|---|
 | PF-1 | Memory per upload is bounded by the chunk size, not the document size | **Enforced** — `tests/unit/test_document_lifecycle.py` watches the producer/consumer interleaving |
 | PF-2 | Uploads and downloads stream; nothing lands on disk | **Enforced** |
-| PF-3 | Multipart is used past the part threshold, so a large upload never needs its length up front | **Enforced** — the MinIO suite asserts a multipart ETag |
+| PF-3 | Multipart is used past the part threshold, so a large upload never needs its length up front | **Enforced** — the S3 suite asserts a multipart ETag |
 | PF-4 | Vault writes are batched, never one round trip per token | **Enforced** — ADR-0022 |
 | PF-5 | Extraction concurrency is bounded, so a burst cannot start a process per request | **Enforced** — `EXTRACTION_MAX_WORKERS`, sampled during a parallel run |
 | PF-6 | Extraction has a wall-clock deadline that actually ends the work | **Enforced** — the worker is terminated, not abandoned |
@@ -133,7 +133,7 @@ Neither has been tuned against a measurement.
 | A-3 | Shutdown releases every handle even when one closer raises | **Enforced** |
 | A-4 | A failure at any step leaves one consistent state across the database and the object store | **Enforced** — `TestConsistency` |
 | A-5 | A row never claims `stored` unless the object exists | **Enforced** |
-| A-6 | An interrupted multipart upload is aborted, including on client disconnect | **Enforced** — asserted against a live MinIO by asking the server for open uploads |
+| A-6 | An interrupted multipart upload is aborted, including on client disconnect | **Enforced** — asserted against live S3 by asking the server for open uploads |
 | A-7 | Deletes are idempotent | **Enforced** |
 | A-8 | Timeouts bound every outbound call | **Enforced** — a silent endpoint fails within the read timeout, not eventually |
 | A-9 | An extraction worker is reaped on every exit path, including timeout | **Enforced** — asserted against `multiprocessing.active_children()` |
@@ -183,15 +183,18 @@ Runtime alerting: **[docs/observability.md](docs/observability.md)**.
 | M-3 | Static typing is strict and passes with no ignores outside declared third-party gaps | **Enforced** — `mypy --strict` |
 | M-4 | Lint and format are enforced, not advisory | **Enforced** |
 | M-5 | Test coverage stays at or above 80% | **Enforced** — currently ~95% |
-| M-6 | An adapter that talks to infrastructure is tested against that infrastructure, not only against a fake | **Enforced** — CI runs the MinIO suite and fails if it would skip |
+| M-6 | An adapter that talks to infrastructure is tested against that infrastructure, not only against a fake | **Enforced** — CI runs the S3 suite and fails if it would skip where credentials exist |
 
 **M-6 is the one worth reading twice.** A fake is a dictionary: it cannot fail
 S3's 5 MiB part minimum, cannot sign a request, and never disagrees with the
 gateway about what an object key means. Four of this project's defects were
 visible only from a running container, and a fifth was a storage test file whose
 fixture had never successfully executed. The CI job therefore sets
-`REQUIRE_OBJECT_STORE_TESTS=1`, which turns a missing MinIO into a red build
-rather than a green one with thirty-five silent skips.
+`REQUIRE_OBJECT_STORE_TESTS` from whether the bucket secret is present, which
+turns a dropped variable or an expired key into a red build rather than a green
+one with thirty-five silent skips. Where no bucket is configured — a fork, or
+a clone without secrets — the suite skips, and that coverage is genuinely
+absent rather than merely unreported (ADR-0035).
 
 ---
 

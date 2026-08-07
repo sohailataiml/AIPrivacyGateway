@@ -1,7 +1,16 @@
 # ADR-0027: Use MinIO as the Local S3-Compatible Object Store
 
-- **Status:** Accepted
+- **Status:** Superseded by [ADR-0035](0035-aws-s3-is-the-object-store.md)
 - **Date:** 2026-08-05
+- **Superseded:** 2026-08-06
+
+> **Superseded.** MinIO is no longer part of this project. The Compose
+> service, its bucket-init container, and the local endpoint described below
+> were removed when AWS S3 became the only object store (ADR-0035). The
+> reasoning here is retained because it explains what was given up: an
+> offline `docker compose up` that could exercise the document path, and a
+> storage adapter verified against a real S3 API in CI without cloud
+> credentials. ADR-0035 records why that trade was made and what replaces it.
 
 ## Context
 

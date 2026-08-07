@@ -55,7 +55,7 @@ async def services(settings: Settings) -> AsyncIterator[Services]:
         redis=fakeredis.aioredis.FakeRedis(decode_responses=False),
         engine=engine,
         # Same reason as the Redis and engine fakes: without it, readiness
-        # would be reachable only with a live MinIO.
+        # would be reachable only with a live object store.
         document_store=FakeDocumentStore(),
     )
     yield built

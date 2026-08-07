@@ -1,7 +1,7 @@
 """In-memory ``DocumentStore`` for tests in other packages.
 
 This fake exists so the document service, the API, and the privacy suites do not
-need MinIO. It reproduces the parts of the contract those tests can get wrong:
+need a bucket. It reproduces the parts of the contract those tests can get wrong:
 
 * a partially written object is never readable -- ``put`` publishes only on
   success, exactly as a completed multipart upload does;
@@ -13,7 +13,7 @@ It also records the chunk sizes it was handed, so a test can prove the caller
 streamed rather than buffered.
 
 It does **not** talk to S3 and does not enforce the 5 MiB part minimum. Use it
-to test the code around the store; use the integration suite against MinIO to
+to test the code around the store; use the integration suite against S3 to
 test the store itself.
 """
 

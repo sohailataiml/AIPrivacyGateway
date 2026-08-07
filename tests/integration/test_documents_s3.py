@@ -1,15 +1,22 @@
-"""Object-store integration tests. Require a disposable MinIO.
+"""Object-store integration tests. Require a real, disposable S3 bucket.
 
-Marked ``integration`` and skipped when ``TEST_OBJECT_STORE_ENDPOINT`` is unset,
+Marked ``integration`` and skipped when ``TEST_OBJECT_STORE_BUCKET`` is unset,
 so the default unit run collects them without failing::
 
-    docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d \\
-        minio minio-init
+    TEST_OBJECT_STORE_BUCKET=my-disposable-bucket \
+    TEST_OBJECT_STORE_REGION=us-east-1 \
+    AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+        pytest tests/integration/test_documents_s3.py -m integration
 
-    TEST_OBJECT_STORE_ENDPOINT=http://localhost:9000 \\
-    TEST_OBJECT_STORE_ACCESS_KEY_ID=sgw-local-access-key \\
-    TEST_OBJECT_STORE_SECRET_ACCESS_KEY=sgw-local-secret-key-not-for-production \\
-        pytest tests/integration/test_documents_minio.py -m integration
+Credentials are read the way the application reads them: from
+``TEST_OBJECT_STORE_ACCESS_KEY_ID`` and ``TEST_OBJECT_STORE_SECRET_ACCESS_KEY``
+if set, otherwise from botocore's default chain, so a machine or runner with an
+assumed role needs no variables beyond the bucket.
+
+**These tests write to and delete from a real bucket.** Point them at a
+disposable one. Every object they create is named under a ``uuid4`` prefix and
+removed in fixture teardown, but a suite interrupted mid-run can leave objects
+behind.
 
 These assertions are the ones ``FakeDocumentStore`` cannot make. The fake is a
 dictionary; it will happily accept a 1-byte multipart part, sign nothing, and
@@ -19,8 +26,8 @@ actually breaks in production lives here:
 * **multipart uploads**, including S3's 5 MiB minimum part size -- the fake
   cannot fail that rule, so only this suite proves a large document uploads at
   all;
-* **request signing and path-style addressing**, which is the difference
-  between MinIO and AWS S3 and the most likely thing to be misconfigured;
+* **request signing and virtual-host addressing**, the most likely thing to be
+  misconfigured and the thing no unit test can exercise;
 * **streaming downloads** through a real HTTP body rather than a list slice;
 * **abort on failure**, proved by asking the server whether an upload is still
   open -- a leaked multipart upload is invisible in an object listing and is
@@ -67,30 +74,36 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.integration
 
-ENDPOINT = os.environ.get("TEST_OBJECT_STORE_ENDPOINT")
-ACCESS_KEY = os.environ.get("TEST_OBJECT_STORE_ACCESS_KEY_ID", "sgw-local-access-key")
-SECRET_KEY = os.environ.get(
-    "TEST_OBJECT_STORE_SECRET_ACCESS_KEY", "sgw-local-secret-key-not-for-production"
-)
-BUCKET = os.environ.get("TEST_OBJECT_STORE_BUCKET", "sgw-documents")
+BUCKET = os.environ.get("TEST_OBJECT_STORE_BUCKET")
+REGION = os.environ.get("TEST_OBJECT_STORE_REGION", "us-east-1")
+
+# Absent means "use the default credential chain", matching how the application
+# resolves credentials on AWS. Empty is not a credential, so it is normalised to
+# None here for the same reason Settings does it.
+ACCESS_KEY = os.environ.get("TEST_OBJECT_STORE_ACCESS_KEY_ID") or None
+SECRET_KEY = os.environ.get("TEST_OBJECT_STORE_SECRET_ACCESS_KEY") or None
+
+# A custom endpoint, for pointing this suite at another S3-compatible service.
+# Unset -- the normal case -- means real AWS S3, which resolves its own.
+ENDPOINT = os.environ.get("TEST_OBJECT_STORE_ENDPOINT") or None
 
 requires_object_store = pytest.mark.skipif(
-    not ENDPOINT,
-    reason="set TEST_OBJECT_STORE_ENDPOINT to a disposable MinIO to run these",
+    not BUCKET,
+    reason="set TEST_OBJECT_STORE_BUCKET to a disposable S3 bucket to run these",
 )
 
 
 def test_this_suite_is_not_silently_skipped() -> None:
     """Fail rather than skip where the object store is supposed to be present.
 
-    A skipped test reports as a pass. CI sets ``REQUIRE_OBJECT_STORE_TESTS=1``,
-    so a MinIO that failed to start, or an environment variable that got
-    dropped from the workflow, turns into a red build instead of a green one
-    with thirty-five silent skips.
+    A skipped test reports as a pass. CI sets ``REQUIRE_OBJECT_STORE_TESTS=1``
+    when it has credentials, so a bucket variable dropped from the workflow, or
+    an expired secret, turns into a red build instead of a green one with
+    thirty-five silent skips.
     """
     if os.environ.get("REQUIRE_OBJECT_STORE_TESTS") == "1":
-        assert ENDPOINT, (
-            "REQUIRE_OBJECT_STORE_TESTS=1 but TEST_OBJECT_STORE_ENDPOINT is unset, "
+        assert BUCKET, (
+            "REQUIRE_OBJECT_STORE_TESTS=1 but TEST_OBJECT_STORE_BUCKET is unset, "
             "so the object store suite would have skipped"
         )
 
@@ -105,15 +118,18 @@ OTHER_KEY = bytes(range(32, 64))
 
 
 def build_store(**overrides: Any) -> S3CompatibleDocumentStore:
-    """A store pointed at the disposable MinIO, with per-test overrides."""
+    """A store pointed at the disposable bucket, with per-test overrides."""
     settings: dict[str, Any] = {
         "bucket": BUCKET,
-        "region": "us-east-1",
+        "region": REGION,
         "endpoint_url": ENDPOINT,
         "access_key_id": ACCESS_KEY,
         "secret_access_key": SECRET_KEY,
         "part_bytes": MIN_PART_BYTES,
-        "use_path_style": True,
+        # Virtual-host addressing, which is what the application resolves for
+        # AWS. Pinning path style here would exercise a signing path no
+        # deployment uses and leave the real one untested.
+        "use_path_style": ENDPOINT is not None,
     }
     settings.update(overrides)
     return S3CompatibleDocumentStore(**settings)
@@ -168,11 +184,17 @@ async def probe() -> AsyncIterator[Any]:
     session = aioboto3.Session()
     async with session.client(
         "s3",
-        region_name="us-east-1",
+        region_name=REGION,
         endpoint_url=ENDPOINT,
         aws_access_key_id=ACCESS_KEY,
         aws_secret_access_key=SECRET_KEY,
-        config=Config(s3={"addressing_style": "path"}, signature_version="s3v4"),
+        config=Config(
+            # Matched to the store under test rather than pinned. A raw client
+            # addressing buckets differently to the adapter would be asking a
+            # different server about a different object.
+            s3={"addressing_style": "path" if ENDPOINT else "virtual"},
+            signature_version="s3v4",
+        ),
     ) as client:
         yield client
 
@@ -434,15 +456,23 @@ class TestFailuresAreClosed:
     async def test_an_unsigned_request_cannot_read_a_stored_object(
         self, store: S3CompatibleDocumentStore, object_key: Callable[[], str]
     ) -> None:
-        # Arrange -- the bucket is private (deploy/compose/minio-init.sh), so
-        # possessing a key must not be enough. Opaque key naming is a defence
-        # in depth, not the access control.
+        # Arrange -- the bucket must be private, so possessing a key is not
+        # enough to read an object. Opaque key naming is a defence in depth,
+        # not the access control. This is worth asserting against real S3
+        # specifically: "block public access" is a bucket setting, and a
+        # misconfigured one is invisible to every signed request the rest of
+        # this suite makes.
         key = object_key()
         await store.put(key=key, chunks=stream(b"%PDF-1.7\nsecret\n"))
+        url = (
+            f"{ENDPOINT}/{BUCKET}/{key}"
+            if ENDPOINT
+            else f"https://{BUCKET}.s3.{REGION}.amazonaws.com/{key}"
+        )
 
         # Act -- no signature, no credentials.
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(f"{ENDPOINT}/{BUCKET}/{key}")
+            response = await client.get(url)
 
         # Assert
         assert response.status_code in {401, 403}
@@ -504,18 +534,21 @@ class TestFailuresAreClosed:
             server.close()
             await server.wait_closed()
 
-    async def test_a_virtual_host_client_cannot_reach_a_path_style_endpoint(self) -> None:
-        # Arrange -- MinIO addresses buckets by path. A store configured for
-        # virtual-host addressing asks for `bucket.127.0.0.1`, which does not
-        # resolve. This proves the setting is wired to something real rather
-        # than being accepted and ignored.
-        virtual = build_store(use_path_style=False, connect_timeout_seconds=2.0)
+    async def test_a_bucket_that_does_not_exist_fails_closed(self) -> None:
+        # Arrange -- the previous version of this test proved addressing style
+        # was wired by pointing a virtual-host client at a path-style server and
+        # watching DNS fail. Against real S3 that probe is meaningless: both
+        # addressing styles resolve, so it would pass without proving anything.
+        # Wiring is asserted in tests/unit/test_object_store_config.py instead;
+        # what is left to prove here is that a bucket the credentials cannot
+        # reach is refused rather than silently treated as empty.
+        missing = build_store(bucket=f"sgw-absent-{uuid4().hex}")
 
         try:
             with pytest.raises((DocumentStorageUnavailableError, DocumentNotFoundError)):
-                await virtual.health()
+                await missing.health()
         finally:
-            await virtual.aclose()
+            await missing.aclose()
 
     async def test_aclose_is_safe_to_call_twice(self, object_key: Callable[[], str]) -> None:
         # Shutdown runs every closer even when an earlier one raised, so this

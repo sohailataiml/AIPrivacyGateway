@@ -903,6 +903,14 @@ version of them — no unused status member, no dead column, no stub that return
 - [ ] Retention enforcement. Documents persist until deleted.
 - [ ] Key rotation tooling. The format supports it; nothing drives it.
 
+> **Storage backend changed after this phase.** The three MinIO lines above
+> record what was built and verified on 2026-08-05 and are left as written.
+> MinIO was removed on 2026-08-06 (ADR-0035): storage is AWS S3, the Compose
+> service and its bucket-init container are gone, `DOCUMENTS_ENABLED` defaults
+> to `false` locally, and the integration suite is
+> `tests/integration/test_documents_s3.py`, gated on a real bucket. Nothing
+> above the `DocumentStore` protocol changed.
+
 ### Deviations worth knowing
 
 - **Routes are `/v1/documents`, not `/documents`.** Every other route in the
