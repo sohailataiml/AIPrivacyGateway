@@ -120,6 +120,37 @@ function authHeaders(apiKey: string): HeadersInit {
   return apiKey ? { Authorization: `Bearer ${apiKey}` } : {};
 }
 
+/**
+ * The one place a policy request is made.
+ *
+ * Exported so `lib/policies.ts` can build on it instead of reaching for
+ * `fetch` again. Every call in this application goes through this function or
+ * one of the typed wrappers below it, which is what keeps the refusal shape,
+ * the auth header, and the `/api` origin in a single place rather than
+ * scattered across components that each get one detail slightly wrong.
+ */
+export async function request<T>(
+  path: string,
+  init: { method?: string; apiKey: string; body?: unknown; signal?: AbortSignal } = {
+    apiKey: "",
+  },
+): Promise<T> {
+  const hasBody = init.body !== undefined;
+  const response = await fetch(`${GATEWAY_ORIGIN}${path}`, {
+    method: init.method ?? "GET",
+    headers: {
+      ...authHeaders(init.apiKey),
+      ...(hasBody ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(hasBody ? { body: JSON.stringify(init.body) } : {}),
+    signal: init.signal,
+  });
+  if (!response.ok) return refuse(response);
+  // 204 has no body to parse, and calling `.json()` on one throws.
+  if (response.status === 204) return undefined as T;
+  return (await response.json()) as T;
+}
+
 export interface ChatRequestInput {
   apiKey: string;
   provider: string;

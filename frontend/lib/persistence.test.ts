@@ -20,12 +20,22 @@ import { getApiKey, hasApiKey, setApiKey, clearApiKey } from "./credential";
 
 const ROOT = join(__dirname, "..");
 const SKIP = new Set(["node_modules", ".next", ".git", "out", "coverage"]);
+/**
+ * Matched against *usage*, not mention.
+ *
+ * The earlier version matched the bare identifier, which flagged a comment
+ * explaining that the playground never writes its input to localStorage --
+ * prose describing the guarantee tripped the guard enforcing it. Requiring a
+ * property access or call keeps every real use caught while letting the code
+ * say what it does not do. `foo.localStorage` cannot slip past either: the
+ * word boundary still anchors the identifier.
+ */
 const FORBIDDEN = [
-  { pattern: /\blocalStorage\b/, why: "localStorage" },
-  { pattern: /\bsessionStorage\b/, why: "sessionStorage" },
-  { pattern: /\bindexedDB\b/i, why: "IndexedDB" },
+  { pattern: /\blocalStorage\s*[.[]/, why: "localStorage" },
+  { pattern: /\bsessionStorage\s*[.[]/, why: "sessionStorage" },
+  { pattern: /\bindexedDB\s*[.[(]/i, why: "IndexedDB" },
   { pattern: /\bdocument\.cookie\b/, why: "cookies" },
-  { pattern: /\bnavigator\.sendBeacon\b/, why: "beacon analytics" },
+  { pattern: /\bnavigator\.sendBeacon\s*\(/, why: "beacon analytics" },
 ];
 
 function sourceFiles(dir: string): string[] {
@@ -57,6 +67,30 @@ describe("browser persistence", () => {
       expect(offenders.map((f) => f.slice(ROOT.length + 1))).toEqual([]);
     });
   }
+
+  it("still catches real usage after being narrowed to property access", () => {
+    // Non-vacuity for every assertion above. Loosening the patterns to allow
+    // prose is only safe if they still match code, so the code they must match
+    // is written out here.
+    const usages = [
+      'localStorage.setItem("draft", text)',
+      "localStorage['draft'] = text",
+      "window.sessionStorage.setItem(k, v)",
+      "indexedDB.open('drafts')",
+      'document.cookie = "draft=" + text',
+      "navigator.sendBeacon('/collect', prompt)",
+    ];
+
+    for (const usage of usages) {
+      expect(FORBIDDEN.some(({ pattern }) => pattern.test(usage))).toBe(true);
+    }
+  });
+
+  it("does not flag prose that merely names the APIs", () => {
+    const prose = "// never written to localStorage, sessionStorage, or IndexedDB";
+
+    expect(FORBIDDEN.some(({ pattern }) => pattern.test(prose))).toBe(false);
+  });
 });
 
 describe("credential storage", () => {

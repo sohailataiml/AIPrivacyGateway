@@ -2,6 +2,7 @@
 
 import { useCallback, useState, useSyncExternalStore } from "react";
 
+import { AppNav } from "@/components/nav/AppNav";
 import { Composer } from "@/components/chat/Composer";
 import { Conversation, type Turn } from "@/components/chat/Conversation";
 import type { DocumentStatus } from "@/components/documents/DocumentCard";
@@ -264,9 +265,10 @@ function Header({
 }) {
   return (
     <header className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-edge px-4 py-3 sm:px-5">
-      <div className="flex items-baseline gap-3">
+      <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
         <h1 className="text-sm font-semibold tracking-wide">Secure AI Gateway</h1>
-        <span className="hidden font-mono text-[11px] text-muted sm:inline">
+        <AppNav />
+        <span className="hidden font-mono text-[11px] text-muted lg:inline">
           {DEFAULT_PROVIDER} · {DEFAULT_MODEL}
         </span>
       </div>
