@@ -20,6 +20,7 @@ import {
   type ProviderView,
 } from "@/lib/gateway";
 import type { InspectorStage } from "@/lib/inspector";
+import { modelFor } from "@/lib/providers";
 
 /**
  * The secure chat workspace (architecture.md section 22.6).
@@ -134,7 +135,7 @@ export default function ChatWorkspace() {
             apiKey,
             documentId: stored.id,
             provider,
-            model: DEFAULT_MODEL,
+            model: modelFor(providers, provider),
             instruction: text,
             ...(sessionId ? { sessionId } : {}),
           });
@@ -162,7 +163,7 @@ export default function ChatWorkspace() {
           const answer = await sendChat({
             apiKey,
             provider,
-            model: DEFAULT_MODEL,
+            model: modelFor(providers, provider),
             content: text,
             ...(sessionId ? { sessionId } : {}),
           });
@@ -233,7 +234,7 @@ export default function ChatWorkspace() {
         setStage("refused");
       }
     },
-    [append, attachment, provider, sessionId],
+    [append, attachment, provider, providers, sessionId],
   );
 
   const busy = stage === "uploading" || stage === "in_flight";
