@@ -16,6 +16,7 @@ a caller holding the wrong scope; ``/v1/detect`` never echoes matched text; and
 from __future__ import annotations
 
 import base64
+import re
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,19 +25,29 @@ from uuid import UUID, uuid4
 import fakeredis.aioredis
 import httpx
 import pytest
+import structlog.testing
 from asgi_lifespan import LifespanManager
 from pydantic import SecretStr
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.api import composition
 from app.api.composition import Services, build_services, stop_services
 from app.config.settings import Settings
 from app.db.base import Base
-from app.db.models import API_KEY_STATUS_ACTIVE, ApiKey, Policy, Tenant
+from app.db.models import API_KEY_STATUS_ACTIVE, ApiKey, AuditEvent, Policy, Tenant
 from app.db.session import build_session_factory
 from app.detection.fakes import FakeDetector
-from app.domain.models import EntityAction, Scope, UnknownTokenAction
+from app.domain.models import (
+    EntityAction,
+    ProtectedChatRequest,
+    ProviderResponse,
+    Scope,
+    UnknownTokenAction,
+)
+from app.llm.mock_provider import MockProvider
 from app.main import create_app
+from app.pipeline.preview import MASK
 from app.policy.models import POLICY_SCHEMA_VERSION, EntityRule, PolicyDocument, ProviderRule
 from app.repositories.api_keys import generate_api_key, prefix_of, verify_api_key
 from app.tokenization.grammar import LEFT_DELIMITER, TOKEN_PATTERN
@@ -145,13 +156,23 @@ def _auth(raw_key: str | None) -> dict[str, str]:
 
 
 def make_settings(**overrides: object) -> Settings:
-    return Settings(
-        app_env="test",
-        api_key_pepper=PEPPER,
-        vault_active_key_id="local1",
-        vault_keys={"local1": SecretStr(VAULT_KEY)},
-        **overrides,  # type: ignore[arg-type]
-    )
+    """Settings for the router suite, pinned against the ambient environment.
+
+    ``openai_api_key`` is forced to ``None`` unless a test asks otherwise.
+    ``Settings`` reads the process environment, so a developer with a real
+    ``OPENAI_API_KEY`` exported would otherwise register the external adapter
+    and change what ``GET /v1/providers`` returns -- a suite that passes or
+    fails depending on whose machine it runs on. It also keeps a real
+    credential out of a test process entirely.
+    """
+    defaults: dict[str, object] = {
+        "app_env": "test",
+        "api_key_pepper": PEPPER,
+        "vault_active_key_id": "local1",
+        "vault_keys": {"local1": SecretStr(VAULT_KEY)},
+        "openai_api_key": None,
+    }
+    return Settings(**{**defaults, **overrides})  # type: ignore[arg-type]
 
 
 def make_key(*, tenant_id: UUID, scopes: Sequence[Scope]) -> tuple[ApiKey, str]:
@@ -189,6 +210,13 @@ def settings() -> Settings:
     return make_settings()
 
 
+AUDIT_FLUSH_SECONDS = 5.0
+"""Bound on draining the audit queue before reading the table.
+
+Long enough that a loaded CI box does not report an empty table as a clean
+result, short enough that a genuinely stuck writer fails the test.
+"""
+
 STARTUP_TIMEOUT_SECONDS = 60.0
 """Generous on purpose.
 
@@ -216,7 +244,18 @@ def keys() -> Keys:
 
 
 @pytest.fixture
-async def engine() -> AsyncIterator[AsyncEngine]:
+def policy() -> PolicyDocument:
+    """The document seeded as the tenant's active policy.
+
+    A fixture rather than a constant so a class can seed a different allowlist
+    -- which is the only way to test "registered but not permitted" separately
+    from "permitted but not registered".
+    """
+    return TEST_POLICY
+
+
+@pytest.fixture
+async def engine(policy: PolicyDocument) -> AsyncIterator[AsyncEngine]:
     built = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with built.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -227,9 +266,9 @@ async def engine() -> AsyncIterator[AsyncEngine]:
         session.add(
             Policy(
                 tenant_id=TENANT_A,
-                name=TEST_POLICY.name,
+                name=policy.name,
                 version=1,
-                document=TEST_POLICY.model_dump(mode="json"),
+                document=policy.model_dump(mode="json"),
                 is_active=True,
             )
         )
@@ -342,6 +381,24 @@ class TestProtectedPreview:
     def settings(self) -> Settings:
         return make_settings(protected_preview_enabled=True)
 
+    @pytest.fixture
+    def provider_calls(self, monkeypatch: pytest.MonkeyPatch) -> list[ProtectedChatRequest]:
+        """Every request the provider actually received, in order.
+
+        Patched on the class rather than on an instance because the registry
+        builds its own; wrapping the real method rather than replacing it keeps
+        the reply -- and therefore restoration -- working.
+        """
+        seen: list[ProtectedChatRequest] = []
+        original = MockProvider.complete
+
+        async def recording(self: MockProvider, request: ProtectedChatRequest) -> ProviderResponse:
+            seen.append(request)
+            return await original(self, request)
+
+        monkeypatch.setattr(MockProvider, "complete", recording)
+        return seen
+
     async def test_it_shows_what_the_provider_saw_with_values_replaced(self, api: Api) -> None:
         response = await api.chat(api.keys.chat_only_a)
 
@@ -387,6 +444,237 @@ class TestProtectedPreview:
         body = response.json()
         assert EMAIL in body["message"]["content"]
         assert body["privacy"]["restored"] >= 2
+
+    async def test_the_preview_is_the_masked_form_of_what_the_provider_received(
+        self, api: Api, provider_calls: list[ProtectedChatRequest]
+    ) -> None:
+        """The derivation, proved rather than asserted in a docstring.
+
+        The expectation is rebuilt here with a local substitution rather than by
+        calling ``preview_of``. That distinction is the whole test: comparing the
+        endpoint against the same helper it calls is a tautology that both sides
+        satisfy together, and it passes unchanged even when the implementation is
+        mutated to reconstruct the text from entity counts.
+
+        Rebuilding it independently means a reconstruction fails here, because no
+        amount of count data can reproduce the caller's prose between the masks.
+        """
+        response = await api.chat(api.keys.chat_only_a)
+
+        assert len(provider_calls) == 1
+        sent = "\n\n".join(message.content for message in provider_calls[0].messages).strip()
+        expected = re.sub(r"⟦SGW:([A-Z0-9_]{1,64}):[0-9A-HJKMNP-TV-Z]{26}⟧", rf"⟦\1:{MASK}⟧", sent)
+
+        assert response.json()["protected_preview"]["text"] == expected
+        # Guards the guard: a prompt that produced no token would make the
+        # substitution a no-op and the comparison meaningless.
+        assert MASK in expected
+
+    async def test_the_provider_still_receives_full_resolvable_tokens(
+        self, api: Api, provider_calls: list[ProtectedChatRequest]
+    ) -> None:
+        """The masking is for the browser only; upstream is untouched.
+
+        Restoration resolves the tokens the provider echoes back, so a mask that
+        leaked into the outbound payload would break the round trip rather than
+        merely look wrong -- and the response assertion below would not catch it,
+        since the mock echoes whatever it is given.
+        """
+        response = await api.chat(api.keys.chat_only_a)
+
+        outbound = "\n".join(message.content for message in provider_calls[0].messages)
+        assert "SGW:" in outbound
+        assert TOKEN_PATTERN.search(outbound) is not None
+        # Full tokens upstream, no originals: the gateway's whole promise.
+        assert not any(value in outbound for value in (EMAIL, PERSON, PHONE))
+        assert EMAIL in response.json()["message"]["content"]
+
+    async def test_the_preview_is_never_logged(
+        self, api: Api, provider_calls: list[ProtectedChatRequest]
+    ) -> None:
+        """Ephemeral means it exists in the response and nowhere else.
+
+        The logging allowlist is deny-by-default, so no preview key can reach a
+        log line today. This asserts the property rather than the mechanism: a
+        later change that adds ``protected_preview`` to the allowlist would be
+        caught here instead of shipping.
+        """
+        with structlog.testing.capture_logs() as captured:
+            response = await api.chat(api.keys.chat_only_a)
+
+        text = response.json()["protected_preview"]["text"]
+        assert text  # a vacuous pass if the preview were empty
+        logged = str(captured)
+        assert text not in logged
+        assert MASK not in logged
+
+    async def test_the_preview_is_never_persisted_or_audited(
+        self, api: Api, services: Services, engine: AsyncEngine
+    ) -> None:
+        """The audit row is built from ``RequestOutcome``, which has no preview.
+
+        Flushed rather than sampled: the audit service writes from a background
+        queue, so reading the table without draining it first would find nothing
+        and pass for the wrong reason.
+        """
+        response = await api.chat(api.keys.chat_only_a)
+        text = response.json()["protected_preview"]["text"]
+        assert text
+
+        await services.audit.flush(wait_seconds=AUDIT_FLUSH_SECONDS)
+        async with build_session_factory(engine)() as session:
+            rows = (await session.execute(select(AuditEvent))).scalars().all()
+
+        assert rows, "no audit row written, so this would pass vacuously"
+        stored = str([row.__dict__ for row in rows])
+        assert text not in stored
+        assert MASK not in stored
+
+
+class TestProviders:
+    """``GET /v1/providers`` -- the selector's source of truth."""
+
+    async def test_rejects_a_request_with_no_credential(self, api: Api) -> None:
+        response = await api.client.get("/v1/providers")
+
+        assert response.status_code == 401
+
+    async def test_rejects_a_key_without_chat_scope(self, api: Api) -> None:
+        response = await api.client.get("/v1/providers", headers=_auth(api.keys.detect_only_a))
+
+        assert response.status_code == 403
+
+    async def test_lists_the_mock_and_preselects_it(self, api: Api) -> None:
+        # Default matters: a demo that opens pointed at a paid service is a demo
+        # that costs money to open.
+        response = await api.client.get("/v1/providers", headers=_auth(api.keys.chat_only_a))
+
+        body = response.json()
+        assert body["default"] == PROVIDER
+        assert [row["alias"] for row in body["providers"]] == [PROVIDER]
+        assert body["providers"][0]["kind"] == "mock"
+        assert body["providers"][0]["available"] is True
+
+    async def test_omits_a_provider_this_deployment_cannot_call(self, api: Api) -> None:
+        """No credential, no adapter, no entry -- rather than a broken option.
+
+        The test settings configure no OpenAI key, so the registry never builds
+        that adapter and the selector never offers it.
+        """
+        response = await api.client.get("/v1/providers", headers=_auth(api.keys.chat_only_a))
+
+        assert "openai" not in [row["alias"] for row in response.json()["providers"]]
+
+    async def test_reports_only_the_model_aliases_the_policy_permits(self, api: Api) -> None:
+        response = await api.client.get("/v1/providers", headers=_auth(api.keys.chat_only_a))
+
+        assert response.json()["providers"][0]["models"] == [MODEL]
+
+    async def test_discloses_no_configuration_detail(self, api: Api) -> None:
+        # Availability is a boolean. Why it is false is a fact about a credential
+        # and stays on the server.
+        response = await api.client.get("/v1/providers", headers=_auth(api.keys.chat_only_a))
+
+        body = response.text.lower()
+        for leak in ("api_key", "sk-", "secret", "endpoint", "base_url", "openai_api_key"):
+            assert leak not in body
+
+
+OPENAI_ALIAS = "openai"
+FAKE_OPENAI_KEY = SecretStr("sk-test-not-a-real-key-0000000000000000")
+"""Structurally plausible, functionally worthless, and never sent anywhere: the
+registry builds an adapter from it but no test in this file makes a call."""
+
+
+class TestProviderAvailabilityGates:
+    """Availability is a conjunction, and each gate is tested on its own.
+
+    The bug this guards against is the two gates being conflated -- a build that
+    reported availability from the registry alone would offer a provider the
+    policy refuses, and the selector's only outcome would be a 403.
+    """
+
+    @pytest.fixture
+    def settings(self) -> Settings:
+        return make_settings(openai_api_key=FAKE_OPENAI_KEY)
+
+    async def test_a_registered_provider_the_policy_forbids_is_unavailable(self, api: Api) -> None:
+        # The credential is configured, so the adapter exists. The default test
+        # policy allows only the mock, so it must not be offered.
+        response = await api.client.get("/v1/providers", headers=_auth(api.keys.chat_only_a))
+
+        rows = {row["alias"]: row for row in response.json()["providers"]}
+        assert rows[OPENAI_ALIAS]["available"] is False
+        assert rows[OPENAI_ALIAS]["models"] == []
+        assert rows[PROVIDER]["available"] is True
+
+    async def test_choosing_it_anyway_is_refused_by_policy(self, api: Api) -> None:
+        response = await api.chat(api.keys.chat_only_a, provider=OPENAI_ALIAS, model="fast")
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "PROVIDER_NOT_ALLOWED"
+
+    async def test_no_part_of_the_credential_appears_in_the_response(self, api: Api) -> None:
+        response = await api.client.get("/v1/providers", headers=_auth(api.keys.chat_only_a))
+
+        assert FAKE_OPENAI_KEY.get_secret_value() not in response.text
+        assert "sk-" not in response.text
+
+
+class TestProviderAvailableWhenPolicyAllowsAndKeyPresent:
+    """Both gates open: the provider is offered."""
+
+    @pytest.fixture
+    def settings(self) -> Settings:
+        return make_settings(openai_api_key=FAKE_OPENAI_KEY)
+
+    @pytest.fixture
+    def policy(self) -> PolicyDocument:
+        return TEST_POLICY.model_copy(
+            update={
+                "providers": {
+                    **TEST_POLICY.providers,
+                    OPENAI_ALIAS: ProviderRule(models=("fast",)),
+                }
+            }
+        )
+
+    async def test_it_is_offered_with_the_models_the_policy_permits(self, api: Api) -> None:
+        response = await api.client.get("/v1/providers", headers=_auth(api.keys.chat_only_a))
+
+        rows = {row["alias"]: row for row in response.json()["providers"]}
+        assert rows[OPENAI_ALIAS]["available"] is True
+        assert rows[OPENAI_ALIAS]["kind"] == "external"
+        assert rows[OPENAI_ALIAS]["models"] == ["fast"]
+
+    async def test_the_mock_is_still_the_default(self, api: Api) -> None:
+        # Adding a real provider must not change what a demo opens pointed at.
+        response = await api.client.get("/v1/providers", headers=_auth(api.keys.chat_only_a))
+
+        assert response.json()["default"] == PROVIDER
+
+
+class TestProviderIdentity:
+    async def test_the_response_names_the_provider_that_answered(self, api: Api) -> None:
+        """Sourced from the adapter the gateway invoked.
+
+        At this level the executed alias and the requested alias agree, so this
+        cannot by itself distinguish "reported" from "echoed" -- that separation
+        is proved in ``tests/security/test_provider_selection.py``, which asserts
+        ``Transmission.provider_alias`` comes from ``adapter.alias``. What this
+        pins is the contract the UI reads.
+        """
+        response = await api.chat(api.keys.chat_only_a)
+
+        assert response.json()["provider"] == PROVIDER
+
+    async def test_a_provider_the_policy_rejects_never_answers(self, api: Api) -> None:
+        # Case included: the policy allowlist is exact, and refuses before the
+        # registry's own normalization is ever reached.
+        response = await api.chat(api.keys.chat_only_a, provider="MoCk")
+
+        assert response.status_code == 403
+        assert response.json()["error"]["code"] == "PROVIDER_NOT_ALLOWED"
 
 
 # ---------------------------------------------------------------------------
