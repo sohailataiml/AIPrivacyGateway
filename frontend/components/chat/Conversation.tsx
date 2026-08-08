@@ -1,5 +1,7 @@
 "use client";
 
+import { SecurityTrace, type SecurityTraceProps } from "@/components/privacy/SecurityTrace";
+
 /**
  * The conversation panel.
  *
@@ -31,6 +33,16 @@ export interface Turn {
   provider?: string;
   /** Restored value count, when the response reported one. */
   restored?: number;
+  /**
+   * The security lifecycle for this exchange, rendered *before* the turn.
+   *
+   * Attached to the answering turn because that is when the gateway reports it,
+   * but emitted as its own list item so the reading order is the pipeline order:
+   * prompt, then what went upstream, then what came back. Nesting it inside the
+   * answer card would have put the protected payload visually after the restored
+   * text it preceded.
+   */
+  trace?: SecurityTraceProps;
 }
 
 const AUTHOR_STYLES: Record<Author, string> = {
@@ -63,8 +75,13 @@ export function Conversation({ turns }: { turns: readonly Turn[] }) {
   }
 
   return (
-    <ol className="flex flex-1 flex-col gap-3 overflow-y-auto p-4" aria-label="Conversation">
-      {turns.map((turn) => (
+    <ol className="flex flex-1 flex-col gap-2 overflow-y-auto p-4" aria-label="Conversation">
+      {turns.flatMap((turn) => [
+        turn.trace ? (
+          <li key={`${turn.id}-trace`}>
+            <SecurityTrace {...turn.trace} />
+          </li>
+        ) : null,
         <li
           key={turn.id}
           className={`rounded-lg border px-4 py-3 ${AUTHOR_STYLES[turn.author]}`}
@@ -95,8 +112,8 @@ export function Conversation({ turns }: { turns: readonly Turn[] }) {
           </div>
           {/* Plain text. No markdown, no HTML injection surface. */}
           <p className="whitespace-pre-wrap break-words text-sm leading-relaxed">{turn.text}</p>
-        </li>
-      ))}
+        </li>,
+      ])}
     </ol>
   );
 }

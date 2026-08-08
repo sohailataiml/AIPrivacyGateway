@@ -38,7 +38,6 @@ const BASE: InspectorProps = {
   refusalMessage: null,
   provider: "mock",
   document: null,
-  preview: null,
 };
 
 function renderInspector(overrides: Partial<InspectorProps> = {}) {
@@ -187,91 +186,24 @@ describe("outbound attestation", () => {
   });
 });
 
-const PREVIEW = {
-  text: "Patient ⟦PERSON:••••⟧ was contacted at ⟦EMAIL_ADDRESS:••••⟧.",
-  entity_summary: [
-    { entity_type: "PERSON", count: 1, action: "tokenize" },
-    { entity_type: "EMAIL_ADDRESS", count: 1, action: "tokenize" },
-  ],
-  outbound_scan: "passed",
-  truncated: false,
-};
-
-describe("protected payload preview", () => {
-  it("shows the masked text the provider actually received", () => {
-    renderInspector({ preview: PREVIEW });
-
-    expect(screen.getByTestId("preview-text").textContent).toContain("⟦PERSON:••••⟧");
-    expect(screen.getByTestId("preview-text").textContent).toContain("Patient");
-  });
-
-  it("renders no full token, because the server sent none", () => {
-    // The masking is one-way and happens before this component sees anything.
-    // A client asked to mask would still hold the token in memory and in the
-    // network tab, which is why the server does it instead.
-    renderInspector({ preview: PREVIEW });
-
-    const rendered = screen.getByTestId("protected-payload").textContent ?? "";
-    expect(rendered).not.toContain("SGW:");
-    expect(rendered).not.toMatch(/[0-9A-HJKMNP-TV-Z]{26}/);
-  });
-
-  it("lists each entity type with its count and the action applied", () => {
-    renderInspector({ preview: PREVIEW });
-    const entities = screen.getByTestId("preview-entities");
-
-    expect(entities.textContent).toContain("PERSON");
-    expect(entities.textContent).toContain("EMAIL_ADDRESS");
-    // Lowercase in the DOM; the panel uppercases it with CSS. Asserting the
-    // rendered text rather than the styled appearance keeps this from breaking
-    // on a style change that alters nothing about the data.
-    expect(entities.textContent).toContain("tokenized");
-  });
-
-  it("counts the values transformed", () => {
-    renderInspector({ preview: PREVIEW });
-
-    // 12 tokenized + 2 redacted + 1 pseudonymized from the shared summary.
-    expect(screen.getByTestId("protected-payload").textContent).toContain(
-      "15 sensitive values transformed",
-    );
-  });
-
-  it("says when the preview was shortened", () => {
-    renderInspector({ preview: { ...PREVIEW, truncated: true } });
-
-    expect(screen.getByText("Shortened for display.")).toBeTruthy();
-  });
-
-  it("falls back to counts when the deployment has not enabled the preview", () => {
-    // The default. The section still reports what happened; it just cannot
-    // show the payload, and says so rather than rendering an empty box.
-    renderInspector({ preview: null });
-
-    expect(screen.queryByTestId("preview-text")).toBeNull();
-    expect(screen.queryByTestId("preview-entities")).toBeNull();
-    expect(screen.getByTestId("protected-payload").textContent).toContain(
-      "never stored or returned",
-    );
-  });
-
-  it("shows no preview block when the server sent a summary but no text", () => {
-    // The document path: entity counts without body text.
-    renderInspector({ preview: { ...PREVIEW, text: null } });
-
-    expect(screen.queryByTestId("preview-text")).toBeNull();
-    expect(screen.getByTestId("preview-entities")).toBeTruthy();
-  });
-});
-
-describe("protected payload", () => {
+describe("outbound totals", () => {
   it("counts protected spans without showing any payload", () => {
     renderInspector();
     const payload = screen.getByTestId("protected-payload");
 
     // tokenized 12 + redacted 2 + pseudonymized 1; `allowed` is excluded
     // because an allowed value was sent as written.
-    expect(payload.textContent).toContain("15 sensitive values transformed");
+    expect(payload.textContent).toContain("15");
+  });
+
+  it("does not repeat the payload card the conversation already shows", () => {
+    // The panel keeps totals; `SecurityTrace` owns the masked text. Two copies
+    // of the same card was the whole reason the page needed scrolling.
+    renderInspector();
+
+    expect(screen.queryByTestId("preview-text")).toBeNull();
+    expect(screen.queryByTestId("preview-entities")).toBeNull();
+    expect(screen.queryByText(/What the LLM received/i)).toBeNull();
   });
 
   it("reports the outbound scan only once an answer proves it passed", () => {

@@ -86,3 +86,70 @@ describe("structure", () => {
     expect(screen.getByText(/Send a prompt/)).toBeTruthy();
   });
 });
+
+describe("the security lifecycle in the conversation", () => {
+  const TRACE = {
+    summary: {
+      detected: 2,
+      tokenized: 2,
+      redacted: 0,
+      pseudonymized: 0,
+      blocked: 0,
+      allowed: 0,
+      restored: 2,
+      unknown_tokens: 0,
+      entity_types: { PERSON: 1, EMAIL_ADDRESS: 1 },
+    },
+    preview: {
+      text: "Please contact ⟦PERSON:••••⟧ at ⟦EMAIL_ADDRESS:••••⟧ about her appointment.",
+      entity_summary: [
+        { entity_type: "PERSON", count: 1, action: "tokenize" },
+        { entity_type: "EMAIL_ADDRESS", count: 1, action: "tokenize" },
+      ],
+      outbound_scan: "passed",
+      truncated: false,
+    },
+    provider: "mock",
+    blocked: null,
+  };
+
+  const EXCHANGE: readonly Turn[] = [
+    { id: "u1", author: "you", text: "Please contact Jane Smith at jane.smith@example.com." },
+    { ...GATEWAY_TURN, trace: TRACE },
+  ];
+
+  it("shows every stage of the story in one view", () => {
+    render(<Conversation turns={EXCHANGE} />);
+
+    expect(screen.getByText("You")).toBeTruthy();
+    expect(screen.getByRole("heading", { name: /Protected payload sent to LLM/i })).toBeTruthy();
+    expect(screen.getByText(/Provider-safe payload preview/i)).toBeTruthy();
+    expect(screen.getByTestId("outbound-scan")).toBeTruthy();
+    expect(screen.getByText("LLM Response (Restored)")).toBeTruthy();
+  });
+
+  it("puts the protected payload between the prompt and the answer", () => {
+    // DOM order is reading order here, so this is also the screen-reader order
+    // and the tab order -- the pipeline sequence does not depend on the arrows.
+    const { container } = render(<Conversation turns={EXCHANGE} />);
+    const text = container.textContent ?? "";
+
+    expect(text.indexOf("Jane Smith")).toBeLessThan(text.indexOf("Protected payload sent to LLM"));
+    expect(text.indexOf("Protected payload sent to LLM")).toBeLessThan(
+      text.indexOf("LLM Response (Restored)"),
+    );
+  });
+
+  it("leaks no token into the conversation DOM", () => {
+    const { container } = render(<Conversation turns={EXCHANGE} />);
+
+    expect(container.textContent).not.toContain("SGW:");
+    expect(container.textContent).not.toMatch(/[0-9A-HJKMNP-TV-Z]{26}/);
+  });
+
+  it("renders no lifecycle for a turn that carries none", () => {
+    render(<Conversation turns={[GATEWAY_TURN]} />);
+
+    expect(screen.queryByTestId("security-trace")).toBeNull();
+  });
+});

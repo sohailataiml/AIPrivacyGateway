@@ -5,7 +5,7 @@ import { BlockedNotice } from "@/components/privacy/Blocked";
 import { DiagnosticRow, EntityBadges, MetricCard } from "@/components/privacy/Metrics";
 import { Attestation, ProtectedPayload } from "@/components/privacy/Outbound";
 import { Pipeline } from "@/components/privacy/Pipeline";
-import type { PrivacySummary, ProtectedPreview } from "@/lib/gateway";
+import type { PrivacySummary } from "@/lib/gateway";
 import { pipelineFor, STAGE_LABELS, type InspectorStage } from "@/lib/inspector";
 
 /**
@@ -20,10 +20,9 @@ import { pipelineFor, STAGE_LABELS, type InspectorStage } from "@/lib/inspector"
  * That is deliberate. A rule enforced by "the developer remembers" is a rule
  * with a shelf life; a rule enforced by the props not existing is not.
  *
- * `preview` is the one narrowed exception, and it is narrowed on the server:
- * it holds a rendering of the provider request body with every token identifier
- * already replaced, so this component still has no way to obtain one. It is
- * absent unless the deployment opts in.
+ * The masked payload is no longer rendered here at all: it belongs beside the
+ * turn it describes, so it lives in `SecurityTrace` within the conversation.
+ * This panel keeps the diagnostics a side panel is actually good for.
  *
  * Ordering follows what a reader needs in the order they need it: the outcome,
  * then the pipeline that produced it, then what was found, then what was sent,
@@ -43,8 +42,6 @@ export interface InspectorProps {
   refusalMessage: string | null;
   provider: string | null;
   document: DocumentStatus | null;
-  /** Masked, server-side. Absent unless the deployment enables it. */
-  preview: ProtectedPreview | null;
 }
 
 function formatLatency(ms: number | null): string | null {
@@ -64,7 +61,6 @@ export function Inspector(props: InspectorProps) {
     refusalMessage,
     provider,
     document,
-    preview,
   } = props;
 
   const busy = stage === "uploading" || stage === "in_flight";
@@ -161,7 +157,7 @@ export function Inspector(props: InspectorProps) {
             <EntityBadges types={summary.entity_types} />
           </section>
 
-          <ProtectedPayload summary={summary} scanPassed={scanPassed} preview={preview} />
+          <ProtectedPayload summary={summary} scanPassed={scanPassed} />
         </>
       ) : null}
 

@@ -5,6 +5,18 @@ import { useRef, useState } from "react";
 const ACCEPTED = ".txt,.pdf,.docx";
 const ACCEPTED_LABEL = "TXT, PDF, or DOCX";
 
+const SAMPLE_PROMPT =
+  "Please contact Jane Smith at jane.smith@example.com about her appointment.";
+/**
+ * Demo affordance only. Entirely synthetic -- no real person, and a reserved
+ * example domain.
+ *
+ * It fills the composer and nothing else: the text still goes through the same
+ * request path as anything typed by hand, and no detection result is assumed
+ * anywhere. What the detector makes of it is the detector's business, which is
+ * the point of showing it.
+ */
+
 /**
  * The prompt composer, with document attachment.
  *
@@ -116,7 +128,15 @@ export function Composer({ disabled, attachment, onAttach, onSend }: ComposerPro
           <label htmlFor="attachment" className="btn-quiet cursor-pointer">
             Attach document
           </label>
-          <span className="text-[11px] text-muted">{ACCEPTED_LABEL}</span>
+          <button
+            type="button"
+            className="btn-quiet"
+            onClick={() => setText(SAMPLE_PROMPT)}
+            disabled={disabled}
+          >
+            Use sample
+          </button>
+          <span className="hidden text-[11px] text-muted sm:inline">{ACCEPTED_LABEL}</span>
         </div>
         <button type="submit" className="btn" disabled={!canSend}>
           {attachment ? "Send document" : "Send"}
