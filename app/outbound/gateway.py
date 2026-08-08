@@ -92,6 +92,14 @@ class Transmission:
     response: ProviderResponse
     attestation: Attestation
     provider_latency_ms: int
+    provider_alias: str
+    """The alias of the adapter that actually ran.
+
+    Taken from the adapter the registry returned, not from the alias the caller
+    asked for. The two agree today -- lookup is by exact normalized alias -- but
+    a response that reports which provider *was called* should be sourced from
+    the call, so it cannot drift into reporting a request that never happened.
+    """
 
     def __repr__(self) -> str:
         return f"Transmission(latency_ms={self.provider_latency_ms}, {self.attestation!r})"
@@ -175,7 +183,10 @@ class OutboundGateway:
         response = await (invoke(adapter, request) if invoke else adapter.complete(request))
         latency_ms = max(int((time.perf_counter() - started) * 1000), 0)
         return Transmission(
-            response=response, attestation=attestation, provider_latency_ms=latency_ms
+            response=response,
+            attestation=attestation,
+            provider_latency_ms=latency_ms,
+            provider_alias=adapter.alias,
         )
 
     def authorize(self, provider_alias: str) -> None:

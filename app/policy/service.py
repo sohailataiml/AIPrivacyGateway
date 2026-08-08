@@ -85,6 +85,21 @@ class PolicyService:
         # known; each entry carries its own ``(tenant_id, version)`` identity.
         self._entries: dict[UUID, _CacheEntry] = {}
 
+    async def active_snapshot(self, tenant_id: UUID) -> PolicySnapshot:
+        """The tenant's active policy, without authorizing a destination.
+
+        ``resolve`` is the request path and deliberately refuses a provider or
+        model outside the allowlist. Listing what a policy *permits* needs the
+        snapshot itself, and routing that through ``resolve`` would mean naming a
+        provider in order to ask which providers exist.
+
+        Read-only, and the same cached snapshot ``resolve`` would use.
+
+        Raises:
+            PolicyNotFoundError: the tenant has no active policy.
+        """
+        return await self._active_snapshot(tenant_id)
+
     async def resolve(self, *, tenant_id: UUID, provider: str, model: str) -> PolicySnapshot:
         """Resolve the active policy and authorize the requested destination.
 

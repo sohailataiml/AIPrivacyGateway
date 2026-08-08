@@ -43,7 +43,7 @@ from app.documents.protocol import DocumentStore
 from app.documents.segmentation import Segmenter
 from app.documents.service import DocumentService
 from app.documents.storage.s3 import S3CompatibleDocumentStore
-from app.llm.registry import build_default_registry
+from app.llm.registry import ProviderRegistry, build_default_registry
 from app.observability.logging import get_logger
 from app.outbound.gateway import OutboundGateway
 from app.pipeline.service import SecurePipeline
@@ -72,6 +72,13 @@ class Services:
     session_factory: Callable[[], AsyncSession]
     redis: Redis
     pipeline: SecurePipeline
+    policy: PolicyService
+    """Read-only policy access for routes that list what a policy permits."""
+
+    providers: ProviderRegistry
+    """The alias-to-adapter map this deployment built. A route may ask it what
+    exists; only the pipeline may ask it for an adapter."""
+
     detector: PresidioDetector
     vault: RedisTokenVault
     audit: AuditService
@@ -233,6 +240,8 @@ async def build_services(
         session_factory=session_factory,
         redis=redis,
         pipeline=pipeline,
+        policy=policy_service,
+        providers=provider_registry,
         detector=detector,
         vault=vault,
         audit=audit,

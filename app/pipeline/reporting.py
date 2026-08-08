@@ -43,12 +43,19 @@ def build_response(
     restored: RestoredOutputLike,
     summary: PrivacySummary,
     protected_preview: ProtectedPreview | None = None,
+    provider_alias: str | None = None,
 ) -> ChatResponse:
     """Assemble the caller's response. The only place restored text is exposed.
 
-    ``provider`` and ``model`` are echoed as the *aliases* the caller asked for,
-    never as the provider's internal model id: which model an alias resolves to
-    is deployment configuration, not part of the API.
+    ``model`` is echoed as the *alias* the caller asked for, never as the
+    provider's internal model id: which model an alias resolves to is deployment
+    configuration, not part of the API.
+
+    ``provider`` is the alias of the adapter that actually ran, supplied by the
+    outbound gateway. Echoing the requested alias would report a provider the
+    request merely asked for, which is the one thing a panel claiming "this is
+    who answered" must not do. It falls back to the requested alias only for
+    callers that predate the parameter.
 
     ``protected_preview`` arrives already masked. This function does not build
     it, so there is no path here that could hand an unmasked token to a caller.
@@ -56,7 +63,7 @@ def build_response(
     return ChatResponse(
         request_id=attempt.request_id,
         session_id=attempt.session_id,
-        provider=attempt.provider_alias,
+        provider=provider_alias if provider_alias is not None else attempt.provider_alias,
         model=attempt.model_alias,
         message=ChatMessage(role=ASSISTANT_ROLE, content=restored.text),
         privacy=summary,

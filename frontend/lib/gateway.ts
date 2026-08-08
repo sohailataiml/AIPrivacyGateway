@@ -59,6 +59,36 @@ export interface ChatResponse {
   protected_preview?: ProtectedPreview | null;
 }
 
+export interface ProviderView {
+  alias: string;
+  /** `mock` or `external`. The backend decides; the UI must not infer it. */
+  kind: string;
+  available: boolean;
+  models: string[];
+}
+
+export interface ProvidersResponse {
+  providers: ProviderView[];
+  default: string;
+}
+
+/**
+ * Which providers this deployment can actually call.
+ *
+ * Fetched rather than hardcoded so the selector cannot offer a provider whose
+ * credential is absent, and cannot hide one a deployment added. No credential
+ * or configuration detail is carried on this response -- availability is a
+ * boolean, and the reason behind it stays on the server.
+ */
+export async function fetchProviders(apiKey: string, signal?: AbortSignal): Promise<ProvidersResponse> {
+  const response = await fetch(`${GATEWAY_ORIGIN}/v1/providers`, {
+    headers: authHeaders(apiKey),
+    signal,
+  });
+  if (!response.ok) return refuse(response);
+  return (await response.json()) as ProvidersResponse;
+}
+
 export interface DocumentResponse {
   id: string;
   filename: string;

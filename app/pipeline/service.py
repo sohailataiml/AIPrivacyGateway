@@ -280,7 +280,13 @@ class SecurePipeline:
         restored = await self._restore(context, snapshot, transmission.response, attempt)
         summary = protected.summary.merged_with(restored.summary)
         return _Completed(
-            response=build_response(attempt, restored, summary, self._preview_of(protected)),
+            response=build_response(
+                attempt,
+                restored,
+                summary,
+                self._preview_of(protected),
+                provider_alias=transmission.provider_alias,
+            ),
             outcome=RequestOutcome(
                 status_code=int(HTTPStatus.OK),
                 summary=summary,

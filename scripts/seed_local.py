@@ -25,6 +25,7 @@ from uuid import UUID
 from app.config.settings import AppEnv, Settings
 from app.db.session import build_engine_from_settings, build_session_factory, transaction
 from app.domain.models import Scope
+from app.llm.openai_provider import OPENAI_PROVIDER_ALIAS
 from app.policy.defaults import DEFAULT_MODEL_ALIAS, DEFAULT_POLICY
 from app.repositories.api_keys import SqlAlchemyApiKeyRepository
 from app.repositories.policies import DEFAULT_POLICY_NAME, SqlAlchemyPolicyRepository
@@ -35,6 +36,9 @@ LOCAL_TENANT_SLUG = "local"
 LOCAL_TENANT_NAME = "Local Development"
 LOCAL_API_KEY_NAME = "local-development"
 LOCAL_PROVIDER_ALIAS = "mock"
+DEMO_OPENAI_MODELS = ("default", "fast")
+"""Model *aliases*, not model ids. `fast` resolves to the cheapest catalog entry,
+which is the one a demo should reach for."""
 LOCAL_MODEL_ALIAS = DEFAULT_MODEL_ALIAS
 # The suppression below is justified: this is the *name* of an environment
 # variable, the only thing provider_configs.secret_ref ever holds. Not a secret.
@@ -52,11 +56,22 @@ def _default_policy_document() -> dict[str, Any]:
     seeded database was still running the unsafe policy while every test passed.
 
     One definition, serialized. The only local substitution is the provider
-    alias, because the shipped default names a provider this machine has no
+    allowlist, because the shipped default names a provider this machine has no
     credentials for.
+
+    The demo policy permits the external provider as well as the mock. Permitting
+    it is not the same as enabling it: the registry adds that adapter only when a
+    credential is configured, so on a credential-free machine the alias is simply
+    absent from ``GET /v1/providers`` and unreachable from chat. Listing it here
+    means that adding the credential is the *only* step needed to demonstrate the
+    same pipeline against a real model -- rather than adding the credential and
+    then discovering the policy still refuses.
     """
     document: dict[str, Any] = DEFAULT_POLICY.model_dump(mode="json")
-    document["providers"] = {LOCAL_PROVIDER_ALIAS: {"models": [LOCAL_MODEL_ALIAS]}}
+    document["providers"] = {
+        LOCAL_PROVIDER_ALIAS: {"models": [LOCAL_MODEL_ALIAS]},
+        OPENAI_PROVIDER_ALIAS: {"models": list(DEMO_OPENAI_MODELS)},
+    }
     return document
 
 

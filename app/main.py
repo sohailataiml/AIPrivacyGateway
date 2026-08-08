@@ -32,6 +32,7 @@ from app.api.v1.documents import router as documents_router
 from app.api.v1.health import router as health_router
 from app.api.v1.metrics import router as metrics_router
 from app.api.v1.policies import router as policies_router
+from app.api.v1.providers import router as providers_router
 from app.api.v1.sessions import router as sessions_router
 from app.config.settings import Settings, get_settings
 from app.observability.logging import configure_logging, get_logger
@@ -128,6 +129,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(chat_router)
     application.include_router(detect_router)
     application.include_router(sessions_router)
+    application.include_router(providers_router)
     application.include_router(policies_router)
     if settings.documents_enabled:
         application.include_router(documents_router)

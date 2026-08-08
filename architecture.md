@@ -763,6 +763,73 @@ Nothing above the `DocumentStore` protocol knows which S3 endpoint it is
 talking to — the adapter has no provider flag to branch on, only resolved
 values (ADR-0034). Nothing below it knows what a document is.
 
+## 21A. Provider Abstraction
+
+One pipeline, two adapters. Provider choice selects **who answers**, and nothing
+else: every privacy stage runs identically either way, and the adapter is
+reached only after all of them.
+
+```
+                                              ┌── MockProvider   (deterministic)
+protect → serialize → attest → outbound scan ─┤
+                                              └── OpenAIProvider (external)
+```
+
+The ordering is structural rather than conventional. `OutboundGateway.send`
+attests and scans the payload, and only then asks the registry for an adapter --
+so a scan that refuses raises before any adapter is looked up, let alone called.
+There is no branch in which a provider is reached first, because the lookup is
+downstream of the check.
+
+| Concern | Where it lives |
+| --- | --- |
+| `LLMProvider` protocol | `app/llm/base.py` |
+| Deterministic adapter | `app/llm/mock_provider.py` |
+| External adapter | `app/llm/openai_provider.py` |
+| Alias-to-adapter map | `app/llm/registry.py` |
+| Scan-then-transmit boundary | `app/outbound/gateway.py` |
+| Selectable providers | `app/api/v1/providers.py` |
+
+**The mock is not a placeholder.** It is the default, and it stays: deterministic
+replies make restoration observable, CI runs without a credential or egress, and
+a fresh checkout cannot spend money. Its token-echo behaviour exists so that
+restoration has something real to resolve.
+
+**Credentials are server-side only.** `build_default_registry` adds the external
+adapter only when `OPENAI_API_KEY` is configured. On a machine without it the
+alias is absent from `GET /v1/providers` and `ProviderNotAllowedError` refuses
+the request. There is deliberately **no fallback to the mock**: answering from a
+deterministic stub while an operator believes a real model replied would
+misrepresent the demo rather than degrade it. The key never appears in a
+response, a log line, an audit record, or the browser.
+
+**Two independent gates.** An adapter must be *registered* (credential present)
+and *permitted by the active policy*. `GET /v1/providers` reports their
+conjunction as a single boolean and never explains which failed -- the
+difference between an absent and a rejected credential is a fact about the
+credential.
+
+**Provider identity is execution metadata.** `Transmission.provider_alias` is
+taken from the adapter that ran, not from the alias the caller requested, so a
+panel reporting "this is who answered" cannot report a request that never
+happened.
+
+### Residual risk: token survivability
+
+Restoration is strict, and stays strict. A model may reformat what it was given
+-- inserting spaces, altering delimiters, copying a token partially, or dropping
+one. A mangled token no longer matches `TOKEN_PATTERN` and is handled by the
+policy's `unknown_output_token_action` like any other unknown token.
+
+Fuzzy matching would be the obvious fix and is deliberately rejected: a matcher
+loose enough to repair a damaged token is loose enough to bind the wrong mapping
+and restore a value into a position the model never intended, which converts a
+cosmetic failure into a disclosure. A visibly unrestored token is the safe
+failure, and it is the one this system chooses.
+
+This risk is proportional to how freely the model rewrites its input, so it is
+larger for an external provider than for the mock, whose echo is exact.
+
 ### Encryption
 
 Per-document data keys derived with HKDF-SHA256, then AES-256-GCM applied

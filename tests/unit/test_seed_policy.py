@@ -15,9 +15,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.llm.openai_provider import OPENAI_PROVIDER_ALIAS
 from app.policy.defaults import DEFAULT_POLICY
 from app.policy.models import PolicyDocument
-from scripts.seed_local import LOCAL_MODEL_ALIAS, LOCAL_PROVIDER_ALIAS, _default_policy_document
+from scripts.seed_local import (
+    DEMO_OPENAI_MODELS,
+    LOCAL_MODEL_ALIAS,
+    LOCAL_PROVIDER_ALIAS,
+    _default_policy_document,
+)
 
 # Substituted deliberately: the shipped default names a provider a local machine
 # has no credentials for.
@@ -48,11 +54,26 @@ def test_seeded_thresholds_are_identical_to_the_shipped_ones() -> None:
     assert seeded == shipped
 
 
-def test_only_the_provider_alias_is_substituted() -> None:
+def test_only_the_provider_allowlist_is_substituted() -> None:
+    """The demo policy permits the mock and the external provider, and nothing else.
+
+    Permitting is not enabling: the registry adds the external adapter only when
+    a credential is configured, so on a credential-free machine the alias is
+    absent from ``GET /v1/providers`` and unreachable from chat. Listing it here
+    means adding the credential is the only step needed to demonstrate the same
+    pipeline against a real model.
+    """
     seeded = _default_policy_document()
 
-    assert set(seeded["providers"]) == {LOCAL_PROVIDER_ALIAS}
+    assert set(seeded["providers"]) == {LOCAL_PROVIDER_ALIAS, OPENAI_PROVIDER_ALIAS}
     assert seeded["providers"][LOCAL_PROVIDER_ALIAS]["models"] == [LOCAL_MODEL_ALIAS]
+    assert seeded["providers"][OPENAI_PROVIDER_ALIAS]["models"] == list(DEMO_OPENAI_MODELS)
+
+
+def test_the_mock_remains_the_local_default_provider() -> None:
+    # A demo that opens pointed at a paid service is a demo that costs money to
+    # open, so the extra allowlist entry must not change which one is default.
+    assert LOCAL_PROVIDER_ALIAS == "mock"
 
 
 def test_the_seeded_document_is_valid() -> None:

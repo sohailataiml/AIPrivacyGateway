@@ -1,21 +1,23 @@
 "use client";
 
-import { useCallback, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 import { AppNav } from "@/components/nav/AppNav";
 import { Composer } from "@/components/chat/Composer";
 import { Conversation, type Turn } from "@/components/chat/Conversation";
+import { ProviderPicker } from "@/components/chat/ProviderPicker";
 import type { DocumentStatus } from "@/components/documents/DocumentCard";
 import { HowItWorks } from "@/components/HowItWorks";
 import { Inspector } from "@/components/privacy/Inspector";
 import { apiKeyLabel, clearApiKey, getApiKey, hasApiKey, setApiKey, subscribe } from "@/lib/credential";
 import {
+  fetchProviders,
   GatewayError,
   processDocument,
   sendChat,
   uploadDocument,
   type PrivacySummary,
-  type ProtectedPreview,
+  type ProviderView,
 } from "@/lib/gateway";
 import type { InspectorStage } from "@/lib/inspector";
 
@@ -49,7 +51,6 @@ interface Snapshot {
   refusalMessage: string | null;
   provider: string | null;
   document: DocumentStatus | null;
-  preview: ProtectedPreview | null;
 }
 
 const EMPTY: Snapshot = {
@@ -62,7 +63,6 @@ const EMPTY: Snapshot = {
   refusalMessage: null,
   provider: null,
   document: null,
-  preview: null,
 };
 
 let turnCounter = 0;
@@ -76,9 +76,30 @@ export default function ChatWorkspace() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [stage, setStage] = useState<InspectorStage>("idle");
   const [snapshot, setSnapshot] = useState<Snapshot>(EMPTY);
+  const [providers, setProviders] = useState<readonly ProviderView[]>([]);
+  const [provider, setProvider] = useState(DEFAULT_PROVIDER);
   const [showKeyForm, setShowKeyForm] = useState(false);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const usingOwnKey = useSyncExternalStore(subscribe, hasApiKey, () => false);
+
+  // The list is deployment state, so it is fetched once rather than assumed.
+  // A failure leaves the picker empty and the default provider in place: the
+  // demo still works, it just offers no choice, which beats offering a choice
+  // that cannot be honoured.
+  useEffect(() => {
+    const abort = new AbortController();
+    fetchProviders(getApiKey() ?? "", abort.signal)
+      .then((response) => {
+        setProviders(response.providers);
+        setProvider((current) =>
+          response.providers.some((row) => row.alias === current && row.available)
+            ? current
+            : response.default,
+        );
+      })
+      .catch(() => undefined);
+    return () => abort.abort();
+  }, [usingOwnKey]);
 
   const append = useCallback((turn: Omit<Turn, "id">) => {
     setTurns((current) => [...current, { ...turn, id: nextId() }]);
@@ -112,7 +133,7 @@ export default function ChatWorkspace() {
           const answer = await processDocument({
             apiKey,
             documentId: stored.id,
-            provider: DEFAULT_PROVIDER,
+            provider,
             model: DEFAULT_MODEL,
             instruction: text,
             ...(sessionId ? { sessionId } : {}),
@@ -135,17 +156,12 @@ export default function ChatWorkspace() {
             refusalMessage: null,
             provider: answer.provider,
             document: { ...uploaded, detected: answer.privacy.detected },
-            // No preview on the document path: it would render extracted
-            // document body text, which this panel has never shown and which
-            // ADR-0030 deliberately keeps out of storage. The counts and the
-            // attestation still describe what happened.
-            preview: null,
           });
         } else {
           setStage("in_flight");
           const answer = await sendChat({
             apiKey,
-            provider: DEFAULT_PROVIDER,
+            provider,
             model: DEFAULT_MODEL,
             content: text,
             ...(sessionId ? { sessionId } : {}),
@@ -156,6 +172,14 @@ export default function ChatWorkspace() {
             text: answer.message.content,
             provider: answer.provider,
             restored: answer.privacy.restored,
+            // The lifecycle renders above this turn, so the reader meets the
+            // protected payload between what they typed and what came back.
+            trace: {
+              summary: answer.privacy,
+              preview: answer.protected_preview ?? null,
+              provider: answer.provider,
+              blocked: null,
+            },
           });
           setSnapshot({
             summary: answer.privacy,
@@ -167,7 +191,6 @@ export default function ChatWorkspace() {
             refusalMessage: null,
             provider: answer.provider,
             document: null,
-            preview: answer.protected_preview ?? null,
           });
         }
         setStage("completed");
@@ -179,7 +202,24 @@ export default function ChatWorkspace() {
           error instanceof GatewayError
             ? { code: error.code, message: error.message, requestId: error.requestId ?? null }
             : { code: "NETWORK", message: "The gateway could not be reached.", requestId: null };
-        append({ author: "system", text: refusal.message });
+        append({
+          author: "system",
+          text: refusal.message,
+          // Only when the gateway itself refused. A network failure never
+          // reached the pipeline, so claiming "not sent to provider" as a
+          // privacy control would be inventing a result the backend never
+          // produced.
+          ...(error instanceof GatewayError
+            ? {
+                trace: {
+                  summary: null,
+                  preview: null,
+                  provider: null,
+                  blocked: { code: refusal.code, message: refusal.message },
+                },
+              }
+            : {}),
+        });
         setSnapshot((current) => ({
           ...EMPTY,
           // A document that uploaded before the refusal really did upload, so
@@ -193,7 +233,7 @@ export default function ChatWorkspace() {
         setStage("refused");
       }
     },
-    [append, attachment, sessionId],
+    [append, attachment, provider, sessionId],
   );
 
   const busy = stage === "uploading" || stage === "in_flight";
@@ -201,6 +241,10 @@ export default function ChatWorkspace() {
   return (
     <main className="grid h-screen grid-rows-[auto_1fr] bg-surface">
       <Header
+        providers={providers}
+        provider={provider}
+        onSelectProvider={setProvider}
+        busy={busy}
         keyLabel={keyLabel}
         usingOwnKey={usingOwnKey}
         onToggleKeyForm={() => setShowKeyForm((open) => !open)}
@@ -246,7 +290,6 @@ export default function ChatWorkspace() {
             refusalMessage={snapshot.refusalMessage}
             provider={snapshot.provider}
             document={snapshot.document}
-            preview={snapshot.preview}
           />
         </div>
       </div>
@@ -257,6 +300,10 @@ export default function ChatWorkspace() {
 }
 
 function Header({
+  providers,
+  provider,
+  onSelectProvider,
+  busy,
   keyLabel,
   usingOwnKey,
   onToggleKeyForm,
@@ -265,6 +312,10 @@ function Header({
   onClearSession,
   onSignOut,
 }: {
+  providers: readonly ProviderView[];
+  provider: string;
+  onSelectProvider: (alias: string) => void;
+  busy: boolean;
   keyLabel: string | null;
   usingOwnKey: boolean;
   onToggleKeyForm: () => void;
@@ -278,9 +329,12 @@ function Header({
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
         <h1 className="text-sm font-semibold tracking-wide">Secure AI Gateway</h1>
         <AppNav />
-        <span className="hidden font-mono text-[11px] text-muted lg:inline">
-          {DEFAULT_PROVIDER} · {DEFAULT_MODEL}
-        </span>
+        <ProviderPicker
+          providers={providers}
+          selected={provider}
+          onSelect={onSelectProvider}
+          disabled={busy}
+        />
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <span className="hidden font-mono text-[11px] text-muted sm:inline">

@@ -33,6 +33,16 @@ services:
       VAULT_KEY_LOCAL1: bG9jYWwtY29tcG9zZS12YXVsdC1rZXktMzJieXRlcyE=
       AUDIT_HMAC_KEY: bG9jYWwtY29tcG9zZS1hdWRpdC1obWFjLTMyYnl0ZXMh
       DEFAULT_PROVIDER: mock
+      # Passed through from the host, never written here. Empty when unset,
+      # which Settings reads as absent -- so `docker compose up` on a machine
+      # with no key still starts, and the registry simply never builds the
+      # OpenAI adapter. Supplying it is the only step needed to demonstrate the
+      # same pipeline against a real model:
+      #
+      #   OPENAI_API_KEY=sk-... docker compose up -d gateway
+      #
+      # The value is not echoed into any image layer, log line, or response.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
 
       # The workspace in frontend/ runs on :3000 and calls this API from the
       # browser. CORS is off by default and stays off in a deployment; the
