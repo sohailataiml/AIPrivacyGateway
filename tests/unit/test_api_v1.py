@@ -39,7 +39,7 @@ from app.domain.models import EntityAction, Scope, UnknownTokenAction
 from app.main import create_app
 from app.policy.models import POLICY_SCHEMA_VERSION, EntityRule, PolicyDocument, ProviderRule
 from app.repositories.api_keys import generate_api_key, prefix_of, verify_api_key
-from app.tokenization.grammar import LEFT_DELIMITER
+from app.tokenization.grammar import LEFT_DELIMITER, TOKEN_PATTERN
 
 TENANT_A = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
 TENANT_B = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
@@ -293,6 +293,14 @@ class TestChat:
         assert body["privacy"]["restored"] >= 2
         assert set(body["privacy"]["entity_types"]) <= {"EMAIL_ADDRESS", "PERSON", "PHONE_NUMBER"}
 
+    async def test_no_protected_preview_unless_the_deployment_enables_it(self, api: Api) -> None:
+        # architecture.md 22.6 forbids the provider request body in the
+        # inspector. The preview is a narrowed exception a deployment opts into,
+        # so the default must be its absence.
+        response = await api.chat(api.keys.chat_only_a)
+
+        assert response.json()["protected_preview"] is None
+
     async def test_the_privacy_summary_carries_counts_and_no_values(self, api: Api) -> None:
         response = await api.chat(api.keys.full_a)
 
@@ -319,6 +327,66 @@ class TestChat:
 
         assert response.status_code == 400
         assert response.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+class TestProtectedPreview:
+    """The preview when a deployment has opted in.
+
+    Overriding the ``settings`` fixture rather than mutating ``services.settings``
+    matters here: the pipeline captures settings when it is built, so a later
+    assignment reaches the routes and not the pipeline, and a test written that
+    way would exercise the default while appearing to exercise the flag.
+    """
+
+    @pytest.fixture
+    def settings(self) -> Settings:
+        return make_settings(protected_preview_enabled=True)
+
+    async def test_it_shows_what_the_provider_saw_with_values_replaced(self, api: Api) -> None:
+        response = await api.chat(api.keys.chat_only_a)
+
+        preview = response.json()["protected_preview"]
+        assert preview is not None
+        assert "⟦EMAIL_ADDRESS:" in preview["text"]
+        # The prose around the values survives; only the values are gone.
+        assert "Email" in preview["text"]
+
+    async def test_the_preview_contains_no_original_value(self, api: Api) -> None:
+        response = await api.chat(api.keys.chat_only_a)
+
+        preview = str(response.json()["protected_preview"])
+        assert not any(value in preview for value in (EMAIL, PERSON, PHONE, SSN, IP))
+
+    async def test_the_preview_contains_no_resolvable_token(self, api: Api) -> None:
+        # The single property that makes this safe to send to a browser. A full
+        # token names a vault key; a masked one names nothing.
+        response = await api.chat(api.keys.chat_only_a)
+
+        text = response.json()["protected_preview"]["text"]
+        assert "SGW:" not in text
+        assert TOKEN_PATTERN.search(text) is None
+
+    async def test_the_entity_summary_reports_what_was_applied(self, api: Api) -> None:
+        response = await api.chat(api.keys.chat_only_a)
+
+        summary = response.json()["protected_preview"]["entity_summary"]
+        by_type = {item["entity_type"]: item for item in summary}
+        assert by_type["EMAIL_ADDRESS"]["action"] == "tokenize"
+        assert by_type["EMAIL_ADDRESS"]["count"] >= 1
+
+    async def test_it_reports_the_outbound_scan(self, api: Api) -> None:
+        response = await api.chat(api.keys.chat_only_a)
+
+        assert response.json()["protected_preview"]["outbound_scan"] == "passed"
+
+    async def test_the_restored_answer_is_unaffected(self, api: Api) -> None:
+        # Non-regression: the preview is additive and must not change what the
+        # caller actually receives.
+        response = await api.chat(api.keys.chat_only_a)
+
+        body = response.json()
+        assert EMAIL in body["message"]["content"]
+        assert body["privacy"]["restored"] >= 2
 
 
 # ---------------------------------------------------------------------------

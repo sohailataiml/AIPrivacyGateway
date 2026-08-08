@@ -27,6 +27,27 @@ export interface ChatMessagePayload {
   content: string;
 }
 
+export interface ProtectedEntitySummary {
+  entity_type: string;
+  count: number;
+  action: string;
+}
+
+/**
+ * A masked rendering of what the provider was sent.
+ *
+ * `text` arrives already masked. The browser never receives a full gateway
+ * token and is never asked to hide one -- a client that had to mask would still
+ * hold the token in memory, in the network tab, and in any error report the
+ * page produced. Absent unless the deployment sets `PROTECTED_PREVIEW_ENABLED`.
+ */
+export interface ProtectedPreview {
+  text: string | null;
+  entity_summary: ProtectedEntitySummary[];
+  outbound_scan: string;
+  truncated: boolean;
+}
+
 export interface ChatResponse {
   request_id: string;
   session_id: string;
@@ -35,6 +56,7 @@ export interface ChatResponse {
   message: ChatMessagePayload;
   privacy: PrivacySummary;
   usage?: { input_tokens?: number; output_tokens?: number; total_tokens?: number } | null;
+  protected_preview?: ProtectedPreview | null;
 }
 
 export interface DocumentResponse {

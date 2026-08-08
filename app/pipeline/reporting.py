@@ -16,7 +16,13 @@ import asyncio
 from typing import Final
 
 from app.domain.errors import ErrorCode, GatewayError
-from app.domain.models import ChatMessage, ChatResponse, MessageRole, PrivacySummary
+from app.domain.models import (
+    ChatMessage,
+    ChatResponse,
+    MessageRole,
+    PrivacySummary,
+    ProtectedPreview,
+)
 from app.observability.logging import get_logger
 from app.pipeline.context import PipelineAttempt, RequestOutcome, audit_payload
 from app.pipeline.protocols import AuditServiceLike, RestoredOutputLike
@@ -36,12 +42,16 @@ def build_response(
     attempt: PipelineAttempt,
     restored: RestoredOutputLike,
     summary: PrivacySummary,
+    protected_preview: ProtectedPreview | None = None,
 ) -> ChatResponse:
     """Assemble the caller's response. The only place restored text is exposed.
 
     ``provider`` and ``model`` are echoed as the *aliases* the caller asked for,
     never as the provider's internal model id: which model an alias resolves to
     is deployment configuration, not part of the API.
+
+    ``protected_preview`` arrives already masked. This function does not build
+    it, so there is no path here that could hand an unmasked token to a caller.
     """
     return ChatResponse(
         request_id=attempt.request_id,
@@ -51,6 +61,7 @@ def build_response(
         message=ChatMessage(role=ASSISTANT_ROLE, content=restored.text),
         privacy=summary,
         usage=restored.usage,
+        protected_preview=protected_preview,
     )
 
 

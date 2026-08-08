@@ -53,6 +53,7 @@ from app.domain.models import (
     Principal,
     PrivacySummary,
     ProtectedChatRequest,
+    ProtectedPreview,
     ProviderResponse,
     RequestContext,
 )
@@ -74,6 +75,12 @@ from app.pipeline.guards import (
     reject_blocked_entities,
     select_request_entities,
     validate_provider_response,
+)
+from app.pipeline.preview import (
+    OUTBOUND_SCAN_PASSED,
+    TRUNCATION_SUFFIX,
+    applied_actions,
+    preview_of,
 )
 from app.pipeline.protocols import (
     AuditServiceLike,
@@ -273,7 +280,7 @@ class SecurePipeline:
         restored = await self._restore(context, snapshot, transmission.response, attempt)
         summary = protected.summary.merged_with(restored.summary)
         return _Completed(
-            response=build_response(attempt, restored, summary),
+            response=build_response(attempt, restored, summary, self._preview_of(protected)),
             outcome=RequestOutcome(
                 status_code=int(HTTPStatus.OK),
                 summary=summary,
@@ -439,6 +446,26 @@ class SecurePipeline:
         # signal about TTLs, and this is where the request's other counters are.
         metrics.record_unknown_tokens(restored.summary.unknown_tokens)
         return restored
+
+    def _preview_of(self, protected: _Protected) -> ProtectedPreview | None:
+        """Build the masked preview, or nothing when the deployment has not opted in.
+
+        Reads the protected messages -- the exact text handed to the outbound
+        gateway -- and masks every token before returning. The transformation is
+        one-way and happens here, so a caller receives no identifier it could
+        present to the vault.
+        """
+        if not self._settings.protected_preview_enabled:
+            return None
+
+        messages = tuple(message.content for message in protected.request.messages)
+        text = preview_of(messages)
+        return ProtectedPreview(
+            text=text,
+            entity_summary=applied_actions(messages),
+            outbound_scan=OUTBOUND_SCAN_PASSED,
+            truncated=text.endswith(TRUNCATION_SUFFIX),
+        )
 
     @property
     def _audit_required(self) -> bool:

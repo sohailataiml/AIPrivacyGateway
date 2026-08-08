@@ -48,6 +48,36 @@ class ChatRequest(BaseModel):
     max_output_tokens: int | None = Field(default=None, ge=1, le=32_768)
 
 
+class ProtectedEntitySummary(BaseModel):
+    """One entity type, how many were transformed, and what was applied."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    entity_type: str
+    count: int
+    action: str
+
+
+class ProtectedPreview(BaseModel):
+    """A masked rendering of what the provider was sent.
+
+    ``text`` contains no gateway token identifiers: the masking happens in
+    ``app.pipeline.preview`` before this model is built, so a browser is never
+    sent a full token and is never asked to hide one. Present only when
+    ``PROTECTED_PREVIEW_ENABLED`` is on; absent by default (architecture.md
+    22.6).
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    text: str | None = None
+    """``None`` when a preview would disclose more than the caller supplied."""
+
+    entity_summary: tuple[ProtectedEntitySummary, ...] = ()
+    outbound_scan: str = "passed"
+    truncated: bool = False
+
+
 class ChatResponse(BaseModel):
     """Restored response returned only to the authorized request principal."""
 
@@ -60,6 +90,8 @@ class ChatResponse(BaseModel):
     message: ChatMessage
     privacy: PrivacySummary
     usage: ProviderUsage | None = None
+    protected_preview: ProtectedPreview | None = None
+    """What the provider saw, masked. Absent unless the deployment enables it."""
 
 
 # ---------------------------------------------------------------------------

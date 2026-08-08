@@ -151,6 +151,20 @@ class Settings(BaseSettings):
     endpoint can need path style while still being AWS.
     """
 
+    protected_preview_enabled: bool = False
+    """Return a masked preview of what the provider was sent (architecture.md 22.6).
+
+    Off by default because the preview is a rendering of the provider request
+    body, which the Privacy Inspector is otherwise forbidden from showing. It is
+    a much weaker disclosure than the preview that rule anticipated -- token
+    identifiers are masked server-side, and original values are gone by the time
+    a preview is built -- but a deployment should opt in rather than discover it.
+
+    Unlike ``diagnostics_return_matched_text`` this is *not* refused in
+    production: it reveals no matched values, so a demo deployment can turn it on
+    deliberately.
+    """
+
     object_store_connect_timeout_seconds: float = Field(default=5.0, gt=0)
     object_store_read_timeout_seconds: float = Field(default=30.0, gt=0)
 

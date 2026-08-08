@@ -15,6 +15,7 @@ import {
   sendChat,
   uploadDocument,
   type PrivacySummary,
+  type ProtectedPreview,
 } from "@/lib/gateway";
 import type { InspectorStage } from "@/lib/inspector";
 
@@ -48,6 +49,7 @@ interface Snapshot {
   refusalMessage: string | null;
   provider: string | null;
   document: DocumentStatus | null;
+  preview: ProtectedPreview | null;
 }
 
 const EMPTY: Snapshot = {
@@ -60,6 +62,7 @@ const EMPTY: Snapshot = {
   refusalMessage: null,
   provider: null,
   document: null,
+  preview: null,
 };
 
 let turnCounter = 0;
@@ -132,6 +135,11 @@ export default function ChatWorkspace() {
             refusalMessage: null,
             provider: answer.provider,
             document: { ...uploaded, detected: answer.privacy.detected },
+            // No preview on the document path: it would render extracted
+            // document body text, which this panel has never shown and which
+            // ADR-0030 deliberately keeps out of storage. The counts and the
+            // attestation still describe what happened.
+            preview: null,
           });
         } else {
           setStage("in_flight");
@@ -159,6 +167,7 @@ export default function ChatWorkspace() {
             refusalMessage: null,
             provider: answer.provider,
             document: null,
+            preview: answer.protected_preview ?? null,
           });
         }
         setStage("completed");
@@ -237,6 +246,7 @@ export default function ChatWorkspace() {
             refusalMessage={snapshot.refusalMessage}
             provider={snapshot.provider}
             document={snapshot.document}
+            preview={snapshot.preview}
           />
         </div>
       </div>

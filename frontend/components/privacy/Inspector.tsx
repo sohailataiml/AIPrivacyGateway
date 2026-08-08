@@ -5,7 +5,7 @@ import { BlockedNotice } from "@/components/privacy/Blocked";
 import { DiagnosticRow, EntityBadges, MetricCard } from "@/components/privacy/Metrics";
 import { Attestation, ProtectedPayload } from "@/components/privacy/Outbound";
 import { Pipeline } from "@/components/privacy/Pipeline";
-import type { PrivacySummary } from "@/lib/gateway";
+import type { PrivacySummary, ProtectedPreview } from "@/lib/gateway";
 import { pipelineFor, STAGE_LABELS, type InspectorStage } from "@/lib/inspector";
 
 /**
@@ -13,13 +13,17 @@ import { pipelineFor, STAGE_LABELS, type InspectorStage } from "@/lib/inspector"
  *
  * architecture.md section 22.6 lists what may appear here and what may not.
  * The "may not" list is the interesting one: matched original values, complete
- * gateway tokens, encrypted mapping payloads, provider request bodies. None of
- * those are reachable from this component, because none of them are on the
- * types it accepts -- `PrivacySummary` is counts and type names, and the
- * attestation is a digest.
+ * gateway tokens, encrypted mapping payloads. None of those are reachable from
+ * this component, because none of them are on the types it accepts --
+ * `PrivacySummary` is counts and type names, and the attestation is a digest.
  *
  * That is deliberate. A rule enforced by "the developer remembers" is a rule
  * with a shelf life; a rule enforced by the props not existing is not.
+ *
+ * `preview` is the one narrowed exception, and it is narrowed on the server:
+ * it holds a rendering of the provider request body with every token identifier
+ * already replaced, so this component still has no way to obtain one. It is
+ * absent unless the deployment opts in.
  *
  * Ordering follows what a reader needs in the order they need it: the outcome,
  * then the pipeline that produced it, then what was found, then what was sent,
@@ -39,6 +43,8 @@ export interface InspectorProps {
   refusalMessage: string | null;
   provider: string | null;
   document: DocumentStatus | null;
+  /** Masked, server-side. Absent unless the deployment enables it. */
+  preview: ProtectedPreview | null;
 }
 
 function formatLatency(ms: number | null): string | null {
@@ -58,6 +64,7 @@ export function Inspector(props: InspectorProps) {
     refusalMessage,
     provider,
     document,
+    preview,
   } = props;
 
   const busy = stage === "uploading" || stage === "in_flight";
@@ -154,7 +161,7 @@ export function Inspector(props: InspectorProps) {
             <EntityBadges types={summary.entity_types} />
           </section>
 
-          <ProtectedPayload summary={summary} scanPassed={scanPassed} />
+          <ProtectedPayload summary={summary} scanPassed={scanPassed} preview={preview} />
         </>
       ) : null}
 

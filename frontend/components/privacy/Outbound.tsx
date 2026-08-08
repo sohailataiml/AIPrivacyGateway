@@ -1,6 +1,6 @@
 "use client";
 
-import type { PrivacySummary } from "@/lib/gateway";
+import type { PrivacySummary, ProtectedPreview as ProtectedPreviewData } from "@/lib/gateway";
 
 /**
  * What left the gateway, described without disclosing any of it.
@@ -15,11 +15,17 @@ import type { PrivacySummary } from "@/lib/gateway";
  * tick rendered by code that verified nothing is precisely the kind of security
  * theatre this panel exists to avoid.
  *
- * **The payload preview is metadata.** There is no safe preview of a protected
- * payload to show: the canonical outbound bytes are never persisted and never
- * returned (that is the point), and partial tokens are still fragments of a
- * reversible identifier. So this section counts spans and states the outcome,
- * and shows no payload at all.
+ * **The payload preview arrives already masked.** `⟦PERSON:••••⟧` is what the
+ * server sends; the identifier that names a vault mapping is replaced before it
+ * leaves the gateway. This component never receives a full token and so is
+ * never trusted to hide one -- a client asked to mask would still hold the token
+ * in memory, in the network tab, and in any error report the page produced.
+ *
+ * The preview is absent unless the deployment sets `PROTECTED_PREVIEW_ENABLED`,
+ * because it is still a rendering of the provider request body, which
+ * architecture.md 22.6 otherwise keeps out of this panel. When it is absent the
+ * section falls back to counts and the scan outcome, which is what it showed
+ * before the preview existed.
  */
 
 const DIGEST_PREFIX_CHARS = 12;
@@ -71,9 +77,11 @@ export function protectedSpanCount(summary: PrivacySummary): number {
 export function ProtectedPayload({
   summary,
   scanPassed,
+  preview,
 }: {
   summary: PrivacySummary;
   scanPassed: boolean;
+  preview?: ProtectedPreviewData | null;
 }) {
   const spans = protectedSpanCount(summary);
 
@@ -83,34 +91,65 @@ export function ProtectedPayload({
         id="payload-heading"
         className="text-[11px] font-semibold uppercase tracking-wide text-muted"
       >
-        Protected payload sent to provider
+        Protected payload sent to LLM
       </h3>
-      <ul className="mt-2 space-y-1 text-xs">
-        <li className="flex items-baseline justify-between gap-3">
-          <span className="text-muted">Provider-safe payload</span>
-          <span className="font-mono text-[11px] tabular-nums text-ink">
-            {spans} span{spans === 1 ? "" : "s"} protected
-          </span>
-        </li>
-        {summary.allowed > 0 ? (
-          <li className="flex items-baseline justify-between gap-3">
-            <span className="text-muted">Allowed by policy</span>
-            <span className="font-mono text-[11px] tabular-nums text-ink">{summary.allowed}</span>
-          </li>
-        ) : null}
-        <li className="flex items-baseline justify-between gap-3">
-          <span className="text-muted">Outbound scan</span>
-          <span
-            className={`font-mono text-[11px] font-semibold ${scanPassed ? "text-protect" : "text-muted"}`}
-            data-testid="outbound-scan"
+
+      <p className="mt-1.5 text-xs text-ink">
+        <span className="font-mono tabular-nums">{spans}</span> sensitive value
+        {spans === 1 ? "" : "s"} transformed
+      </p>
+
+      {preview && preview.entity_summary.length > 0 ? (
+        <ul className="mt-2 space-y-1" data-testid="preview-entities">
+          {preview.entity_summary.map((item) => (
+            <li
+              key={`${item.entity_type}-${item.action}`}
+              className="flex items-baseline justify-between gap-3 text-[11px]"
+            >
+              <span className="font-mono text-ink">
+                {item.entity_type} <span className="text-muted">×&nbsp;{item.count}</span>
+              </span>
+              <span className="font-mono uppercase tracking-wide text-protect">
+                {item.action}d
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {preview?.text ? (
+        <div className="mt-3">
+          <h4 className="text-[10px] uppercase tracking-wide text-muted">Preview</h4>
+          {/* Plain text, pre-wrapped. The masking already happened on the
+              server -- this component receives no token to hide, which is why
+              it is safe to render at all. */}
+          <p
+            className="mt-1 whitespace-pre-wrap break-words rounded border border-edge bg-surface
+                       px-2.5 py-2 font-mono text-[11px] leading-relaxed text-ink"
+            data-testid="preview-text"
           >
-            {scanPassed ? "PASSED" : "—"}
-          </span>
-        </li>
-      </ul>
+            {preview.text}
+          </p>
+          {preview.truncated ? (
+            <p className="mt-1 text-[10px] text-muted">Shortened for display.</p>
+          ) : null}
+        </div>
+      ) : null}
+
+      <p className="mt-2.5 flex items-baseline justify-between gap-3 text-xs">
+        <span className="text-muted">Outbound scan</span>
+        <span
+          className={`font-mono text-[11px] font-semibold ${scanPassed ? "text-protect" : "text-muted"}`}
+          data-testid="outbound-scan"
+        >
+          {scanPassed ? "PASSED" : "—"}
+        </span>
+      </p>
+
       <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
-        The payload itself is never stored or returned, so it cannot be shown
-        here — only what was done to it.
+        {preview?.text
+          ? "Values were replaced before transmission. The provider saw the text above; the identifiers behind each mask never leave the gateway."
+          : "The payload itself is never stored or returned, so it cannot be shown here — only what was done to it."}
       </p>
     </section>
   );

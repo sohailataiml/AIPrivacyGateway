@@ -652,3 +652,41 @@ and
   policy endpoints until it is re-issued.
 - **The JSON policy preview from architecture.md §22.10 was not built.** The
   entity table and diff cover what it was for.
+
+## §7 Protected Payload Preview
+
+Added so the demo can show, rather than assert, that values were transformed
+before the provider call. `ChatResponse.protected_preview` carries the protected
+text with every token identifier masked, per-type counts of what was applied,
+and the outbound scan outcome.
+
+**Verified 2026-08-08.** Backend: `ruff format-check`, `ruff check`, `mypy app`,
+1759 unit/privacy/security tests. Frontend: `lint`, `typecheck`, 165 tests,
+`build`.
+
+### The constraint this had to work within
+
+architecture.md 22.6 forbade the provider request body in the Privacy Inspector
+outright, and allowed a "Protected Prompt Preview" only behind a privileged
+endpoint disabled in production. Rather than override an accepted rule silently,
+22.6 is narrowed: a masked preview is permitted, gated by
+`PROTECTED_PREVIEW_ENABLED`, which defaults to off.
+
+Masking happens in `app/pipeline/preview.py`, on the server. The browser is
+never sent a full token and never asked to hide one -- a client that had to mask
+would still hold the identifier in memory, in the network tab, and in any error
+report the page produced.
+
+### Deliberate limits
+
+- **The document path returns no preview text.** It would render extracted
+  document body, which this panel has never shown and which ADR-0030 keeps out
+  of storage. Counts and the attestation still describe what happened.
+- **Actions are read from the tokens, not from the policy.** A value scoring
+  below its threshold is left in place whatever the policy says about its type,
+  so reading the policy would report protection that did not happen.
+- **`pseudonymize` is reported as `tokenize`.** Both mint a resolvable token
+  with the same grammar, and the token in the text is what actually happened;
+  guessing from the policy would be an inference, not a reading.
+- **Bounded at 600 characters**, cut on a mask boundary so a truncation never
+  leaves a dangling delimiter that reads as a malformed token.

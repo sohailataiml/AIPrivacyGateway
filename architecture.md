@@ -1655,10 +1655,40 @@ It must not include:
 - matched original values
 - complete gateway tokens
 - encrypted mapping payloads
-- provider request body
+- the raw provider request body
 - prompt or response in analytics events
 
-A development-only “Protected Prompt Preview” may be supported using synthetic data or a privileged diagnostic endpoint. It must be disabled in production by default and must never reveal token mappings.
+**Protected Payload Preview.** The earlier rule forbade the provider request
+body outright and allowed a development-only "Protected Prompt Preview" behind a
+privileged endpoint. That is narrowed rather than relaxed: a *masked* preview may
+be returned, and the masking happens on the server.
+
+`PROTECTED_PREVIEW_ENABLED` gates it, defaulting to off, so a deployment opts in.
+When on, `ChatResponse.protected_preview` carries the protected text with every
+token identifier already replaced -- `⟦SGW:PERSON:01J8Z6…⟧` becomes
+`⟦PERSON:••••⟧` -- plus per-type counts of what was applied and the outbound
+scan outcome.
+
+Three properties make it acceptable, and all three are enforced by tests rather
+than by convention (`tests/privacy/test_protected_preview.py`):
+
+- **The masking is server-side and one-way.** A browser never receives a full
+  token and is never asked to hide one. A client that had to mask would still
+  hold the identifier in memory, in the network tab, and in any error report the
+  page produced.
+- **No original value can appear.** They are gone from the text by the time a
+  preview is built; the tokens stand in their place.
+- **Entity types are already public**, in `PrivacySummary.entity_types` and in
+  every `/v1/detect` response, so keeping them discloses nothing new.
+
+What it *does* disclose is the non-sensitive text around each mask. For a chat
+prompt that is what the caller typed and already holds. For a document it would
+be extracted body text, which this panel has never shown and which ADR-0030
+keeps out of storage -- so the document path returns no preview text.
+
+Unlike `DIAGNOSTICS_RETURN_MATCHED_TEXT`, this flag is not refused in
+production: it reveals no matched values, so a demo deployment can enable it
+deliberately.
 
 ### 22.7 Security Dashboard
 
